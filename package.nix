@@ -15,9 +15,6 @@ buildGoModule rec {
 
   vendorHash = null;
 
-  # Allow network access during build for Go modules
-  proxyVendor = true;
-
   # Runtime dependencies
   buildInputs = [
     zfs
