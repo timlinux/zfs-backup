@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -65,6 +66,7 @@ const (
 	stateMenu sessionState = iota
 	stateConfirm
 	stateInput
+	statePassword
 	stateRunning
 	stateResult
 	stateHelp
@@ -81,19 +83,22 @@ func (i menuItem) Description() string { return i.description }
 func (i menuItem) FilterValue() string { return i.title }
 
 type model struct {
-	state       sessionState
-	list        list.Model
-	spinner     spinner.Model
-	input       textinput.Model
-	operation   string
-	message     string
-	err         error
-	width       int
-	height      int
-	confirmMsg  string
-	confirmYes  bool
-	quitting    bool
-	showingHelp bool
+	state         sessionState
+	list          list.Model
+	spinner       spinner.Model
+	input         textinput.Model
+	passwordInput textinput.Model
+	operation     string
+	message       string
+	err           error
+	width         int
+	height        int
+	confirmMsg    string
+	confirmYes    bool
+	quitting      bool
+	showingHelp   bool
+	password      string
+	devicePath    string
 }
 
 func initialModel() model {
@@ -146,11 +151,19 @@ func initialModel() model {
 	ti.CharLimit = 50
 	ti.Width = 40
 
+	pi := textinput.New()
+	pi.Placeholder = "Enter encryption password"
+	pi.EchoMode = textinput.EchoPassword
+	pi.EchoCharacter = '•'
+	pi.CharLimit = 256
+	pi.Width = 40
+
 	return model{
-		state:   stateMenu,
-		list:    l,
-		spinner: s,
-		input:   ti,
+		state:         stateMenu,
+		list:          l,
+		spinner:       s,
+		input:         ti,
+		passwordInput: pi,
 	}
 }
 
@@ -179,7 +192,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					switch i.title {
 					case "Backup ZFS (incremental)":
 						m.operation = "backup"
-						return m.startOperation()
+						m.state = statePassword
+						m.passwordInput.SetValue("")
+						m.passwordInput.Focus()
+						return m, textinput.Blink
 					case "Force Backup ZFS (destructive)":
 						m.state = stateConfirm
 						m.confirmMsg = "⚠️  This will delete all previous snapshots on the backup disk.\nAre you sure you want to continue?"
@@ -207,6 +223,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "y", "Y":
 				m.confirmYes = true
+				// Check if this operation needs password
+				if m.operation == "force-backup" {
+					m.state = statePassword
+					m.passwordInput.SetValue("")
+					m.passwordInput.Focus()
+					return m, textinput.Blink
+				} else if m.operation == "prepare" {
+					// For prepare, use the stored device path
+					m.devicePath = m.input.Value()
+				}
 				return m.startOperation()
 			case "n", "N", "esc":
 				m.state = stateMenu
@@ -219,6 +245,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "enter":
 				if m.input.Value() != "" {
+					m.devicePath = m.input.Value()
 					m.state = stateConfirm
 					m.confirmMsg = fmt.Sprintf("⚠️  WARNING: You are about to erase all data on %s.\nThis action is irreversible!\nAre you absolutely sure?", m.input.Value())
 					m.confirmYes = false
@@ -226,6 +253,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "esc":
 				m.state = stateMenu
+				return m, nil
+			case "ctrl+c", "q":
+				m.quitting = true
+				return m, tea.Quit
+			}
+		} else if m.state == statePassword {
+			switch msg.String() {
+			case "enter":
+				if m.passwordInput.Value() != "" {
+					m.password = m.passwordInput.Value()
+					return m.startOperation()
+				}
+			case "esc":
+				m.state = stateMenu
+				m.password = ""
+				m.passwordInput.SetValue("")
 				return m, nil
 			case "ctrl+c", "q":
 				m.quitting = true
@@ -261,6 +304,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.list, cmd = m.list.Update(msg)
 	case stateInput:
 		m.input, cmd = m.input.Update(msg)
+	case statePassword:
+		m.passwordInput, cmd = m.passwordInput.Update(msg)
 	}
 
 	return m, cmd
@@ -295,6 +340,14 @@ func (m model) View() string {
 		b.WriteString(infoStyle.Render("Enter the device path to use for backup:") + "\n\n")
 		b.WriteString(m.input.View() + "\n\n")
 		b.WriteString(subtitleStyle.Render("Example: /dev/sda") + "\n\n")
+		b.WriteString(infoStyle.Render("Press Enter to continue, Esc to cancel") + "\n")
+		return menuStyle.Render(b.String())
+
+	case statePassword:
+		var b strings.Builder
+		b.WriteString(titleStyle.Render("🔐 Encryption Password") + "\n\n")
+		b.WriteString(infoStyle.Render("Enter the encryption password for NIXBACKUPS:") + "\n\n")
+		b.WriteString(m.passwordInput.View() + "\n\n")
 		b.WriteString(infoStyle.Render("Press Enter to continue, Esc to cancel") + "\n")
 		return menuStyle.Render(b.String())
 
@@ -333,11 +386,13 @@ OPERATIONS:
   📦 Backup ZFS (incremental)
      Performs an incremental backup using syncoid. Creates a timestamped
      snapshot, syncs to the external backup pool, and prunes old snapshots
-     while keeping monthly archives.
+     while keeping monthly archives. You will be prompted for the encryption
+     password.
 
   🔥 Force Backup ZFS (destructive)
      Forces a complete backup by deleting previous snapshots on the backup
-     disk. Use this when local and backup are out of sync.
+     disk. Use this when local and backup are out of sync. You will be
+     prompted for the encryption password.
 
   🔧 Prepare Backup Device
      Creates an encrypted ZFS pool on a new external drive. This will
@@ -349,10 +404,11 @@ OPERATIONS:
      Always use this before unplugging the backup drive.
 
 REQUIREMENTS:
-  - Root/sudo privileges for ZFS operations
   - syncoid installed (from sanoid package)
   - ZFS filesystem with NIXROOT pool
   - External drive for NIXBACKUPS pool
+  - Root privileges (sudo) OR ZFS delegation configured
+  - Encryption password for NIXBACKUPS pool
 
 KEYBOARD SHORTCUTS:
   ↑/↓      Navigate menu
@@ -379,28 +435,34 @@ func (m model) startOperation() (model, tea.Cmd) {
 
 	switch m.operation {
 	case "backup":
-		cmd = runBackup()
+		cmd = runBackup(m.password)
 	case "force-backup":
-		cmd = runForceBackup()
+		cmd = runForceBackup(m.password)
 	case "prepare":
-		device := m.input.Value()
-		cmd = runPrepare(device)
+		cmd = runPrepare(m.devicePath)
 	case "unmount":
 		cmd = runUnmount()
 	}
 
+	// Clear password from memory
+	m.password = ""
+	m.passwordInput.SetValue("")
+
 	return m, tea.Batch(m.spinner.Tick, cmd)
 }
 
-func checkRoot() error {
-	if os.Geteuid() != 0 {
-		return fmt.Errorf("this tool requires root privileges.\nPlease run with: sudo zfs-backup")
+func checkPermissions() error {
+	// Check if we can run zfs commands by testing a simple read-only operation
+	cmd := exec.Command("zfs", "list", "-H", "-o", "name")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("insufficient permissions to run ZFS commands.\nPlease run with: sudo zfs-backup\nOr configure ZFS delegation for your user")
 	}
 	return nil
 }
 
 func main() {
-	if err := checkRoot(); err != nil {
+	// Check permissions first
+	if err := checkPermissions(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("⚠️  "+err.Error()))
 		os.Exit(1)
 	}
@@ -457,6 +519,8 @@ Examples:
   sudo zfs-backup              # Show interactive menu
   sudo zfs-backup --backup     # Run incremental backup
   sudo zfs-backup --unmount    # Unmount backup disk
+
+Note: If you have ZFS delegation configured for your user, you can omit sudo.
 `
 	fmt.Println(reportBoxStyle.Render(help))
 }

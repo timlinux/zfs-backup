@@ -17,7 +17,7 @@ A beautiful TUI (Terminal User Interface) for managing ZFS backups, built with [
 
 - ZFS filesystem with `NIXROOT` pool
 - [syncoid](https://github.com/jimsalterjrs/sanoid) (from sanoid package)
-- Root/sudo privileges for ZFS operations
+- Root privileges (via sudo) OR ZFS delegation configured for your user
 - External drive for `NIXBACKUPS` pool
 
 ## Installation
@@ -73,6 +73,8 @@ sudo zfs-backup
 
 Navigate using arrow keys, select options with Enter.
 
+**Note:** If you have ZFS delegation configured for your user, you can run without sudo.
+
 ### CLI Mode
 
 For automation and scripting:
@@ -90,6 +92,8 @@ sudo zfs-backup --unmount
 # Show help
 zfs-backup --help
 ```
+
+**Note:** If you have ZFS delegation configured, you can omit `sudo`.
 
 ## Operations
 
@@ -136,6 +140,22 @@ The tool works with the following ZFS pool structure:
 - **NIXROOT/home** - Local ZFS filesystem to backup
 - **NIXBACKUPS/home** - External backup destination
 
+### Running Without Sudo (Optional)
+
+If you prefer not to use sudo, you can configure ZFS delegation to allow your user to perform the necessary operations:
+
+```bash
+# Allow your user to perform ZFS operations on NIXROOT and NIXBACKUPS
+sudo zfs allow -u $USER snapshot,send,receive,mount,create,destroy NIXROOT
+sudo zfs allow -u $USER snapshot,send,receive,mount,create,destroy,load-key NIXBACKUPS
+
+# Allow pool import/export operations
+sudo zpool set delegation=on NIXROOT
+sudo zpool set delegation=on NIXBACKUPS
+```
+
+**Note:** Pool operations (import/export) and some encryption operations may still require root privileges even with delegation configured. For most users, running with `sudo` is the simplest approach.
+
 ## Keyboard Shortcuts
 
 | Key | Action |
@@ -159,7 +179,7 @@ Build and run:
 
 ```bash
 go build
-sudo ./zfs-backup
+./zfs-backup
 ```
 
 ## Architecture

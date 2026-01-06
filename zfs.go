@@ -12,17 +12,17 @@ import (
 )
 
 // runBackup performs an incremental backup
-func runBackup() tea.Cmd {
+func runBackup(password string) tea.Cmd {
 	return func() tea.Msg {
-		msg, err := performBackup()
+		msg, err := performBackup(password)
 		return operationResultMsg{message: msg, err: err}
 	}
 }
 
 // runForceBackup performs a destructive force backup
-func runForceBackup() tea.Cmd {
+func runForceBackup(password string) tea.Cmd {
 	return func() tea.Msg {
-		msg, err := performForceBackup()
+		msg, err := performForceBackup(password)
 		return operationResultMsg{message: msg, err: err}
 	}
 }
@@ -45,7 +45,12 @@ func runUnmount() tea.Cmd {
 
 // Synchronous versions for CLI mode
 func runBackupSync() {
-	msg, err := performBackup()
+	// Prompt for password
+	fmt.Print("Enter encryption password for NIXBACKUPS: ")
+	var password string
+	fmt.Scanln(&password)
+
+	msg, err := performBackup(password)
 	if err != nil {
 		fmt.Println(errorStyle.Render("❌ " + err.Error()))
 		return
@@ -54,7 +59,12 @@ func runBackupSync() {
 }
 
 func runForceBackupSync() {
-	msg, err := performForceBackup()
+	// Prompt for password
+	fmt.Print("Enter encryption password for NIXBACKUPS: ")
+	var password string
+	fmt.Scanln(&password)
+
+	msg, err := performForceBackup(password)
 	if err != nil {
 		fmt.Println(errorStyle.Render("❌ " + err.Error()))
 		return
@@ -71,7 +81,7 @@ func runUnmountSync() {
 	fmt.Println(statusStyle.Render(msg))
 }
 
-func performBackup() (string, error) {
+func performBackup(password string) (string, error) {
 	var output strings.Builder
 
 	// Check if NIXBACKUPS is already imported
@@ -88,7 +98,7 @@ func performBackup() (string, error) {
 		}
 
 		output.WriteString("🔓 Loading encryption key for NIXBACKUPS\n")
-		if err := runCommand("zfs", "load-key", "NIXBACKUPS"); err != nil {
+		if err := loadZFSKey("NIXBACKUPS", password); err != nil {
 			return "", fmt.Errorf("failed to load encryption key: %w", err)
 		}
 	} else {
@@ -102,7 +112,7 @@ func performBackup() (string, error) {
 
 		if keyStatus != "available" {
 			output.WriteString(fmt.Sprintf("🔓 Loading encryption key for NIXBACKUPS (key status: %s)\n", keyStatus))
-			if err := runCommand("zfs", "load-key", "NIXBACKUPS"); err != nil {
+			if err := loadZFSKey("NIXBACKUPS", password); err != nil {
 				return "", fmt.Errorf("failed to load encryption key: %w", err)
 			}
 		} else {
@@ -168,7 +178,7 @@ func performBackup() (string, error) {
 	return output.String(), nil
 }
 
-func performForceBackup() (string, error) {
+func performForceBackup(password string) (string, error) {
 	var output strings.Builder
 
 	timestamp := time.Now().Format("2006-01-02.15h-04")
@@ -179,7 +189,7 @@ func performForceBackup() (string, error) {
 	}
 
 	output.WriteString("🔓 Loading encryption key for NIXBACKUPS\n")
-	if err := runCommand("zfs", "load-key", "NIXBACKUPS"); err != nil {
+	if err := loadZFSKey("NIXBACKUPS", password); err != nil {
 		return "", fmt.Errorf("failed to load encryption key: %w", err)
 	}
 
@@ -290,6 +300,57 @@ func runCommand(name string, args ...string) error {
 	if err != nil {
 		return fmt.Errorf("%s failed: %w\nOutput: %s", name, err, string(output))
 	}
+	return nil
+}
+
+func runCommandWithStdin(stdin string, name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+
+	// Create a pipe for stdin
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdin pipe: %w", err)
+	}
+
+	// Capture stdout and stderr
+	outputBytes := &bytes.Buffer{}
+	cmd.Stdout = outputBytes
+	cmd.Stderr = outputBytes
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("%s failed to start: %w", name, err)
+	}
+
+	// Write the password to stdin and close it
+	_, err = stdinPipe.Write([]byte(stdin + "\n"))
+	if err != nil {
+		return fmt.Errorf("failed to write to stdin: %w", err)
+	}
+	stdinPipe.Close()
+
+	// Wait for command to complete
+	err = cmd.Wait()
+	if err != nil {
+		return fmt.Errorf("%s failed: %w\nOutput: %s", name, err, outputBytes.String())
+	}
+
+	return nil
+}
+
+// loadZFSKey loads a ZFS encryption key by passing password via stdin
+func loadZFSKey(dataset, password string) error {
+	cmd := exec.Command("zfs", "load-key", dataset)
+
+	// Set stdin to read from our password string
+	cmd.Stdin = strings.NewReader(password + "\n")
+
+	// Capture output for error reporting
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("zfs load-key failed: %w\nOutput: %s", err, string(output))
+	}
+
 	return nil
 }
 
