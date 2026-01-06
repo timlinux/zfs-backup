@@ -2,6 +2,12 @@
 
 A beautiful TUI (Terminal User Interface) for managing ZFS backups, built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lipgloss](https://github.com/charmbracelet/lipgloss).
 
+
+
+Please note that this backup tool is pretty specific to my systems which have a
+pool called NIXROOT and the external drive is prepared with a pool called
+NIXBACKUPS.
+
 ![ZFS Backup Screenshot](https://via.placeholder.com/800x400.png?text=ZFS+Backup+TUI)
 
 ## Features
