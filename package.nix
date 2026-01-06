@@ -13,7 +13,7 @@ buildGoModule rec {
 
   src = ./.;
 
-  vendorHash = lib.fakeHash;
+  vendorHash = "sha256-AJMPqqlmE6eowNpgIiPi55Kv2KJ4ejnjgrrcgXicPbc=";
 
   # Runtime dependencies
   buildInputs = [
