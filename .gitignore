@@ -29,3 +29,4 @@ result-*
 *.swo
 *~
 .DS_Store
+.claude/
