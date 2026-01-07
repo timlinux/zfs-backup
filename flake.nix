@@ -12,7 +12,16 @@
       nixpkgs,
       flake-utils,
     }:
-    flake-utils.lib.eachDefaultSystem (
+    {
+      # Overlay to add zfs-backup to pkgs
+      overlays.default = final: prev: {
+        zfs-backup = final.callPackage ./package.nix { };
+      };
+
+      # NixOS module
+      nixosModules.default = import ./module.nix;
+    }
+    // flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};

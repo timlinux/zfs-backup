@@ -28,31 +28,76 @@ NIXBACKUPS.
 
 ## Installation
 
-### With Nix Flakes
+### Method 1: NixOS Module (Recommended)
 
 Add to your `flake.nix`:
 
 ```nix
 {
   inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     zfs-backup.url = "github:timlinux/zfs-backup";
   };
 
   outputs = { self, nixpkgs, zfs-backup, ... }: {
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
       modules = [
-        {
-          environment.systemPackages = [
-            zfs-backup.packages.x86_64-linux.default
-          ];
-        }
+        # Import the module
+        zfs-backup.nixosModules.default
+        # Add the overlay so pkgs.zfs-backup is available
+        { nixpkgs.overlays = [ zfs-backup.overlays.default ]; }
+
+        ./configuration.nix
       ];
     };
   };
 }
 ```
 
-Or run directly:
+Then in your `configuration.nix`:
+
+```nix
+{ config, pkgs, ... }:
+{
+  # Enable the service (adds package to systemPackages)
+  services.zfs-backup.enable = true;
+}
+```
+
+### Method 2: Direct Package Installation
+
+If you don't need the module features, just add the overlay:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    zfs-backup.url = "github:timlinux/zfs-backup";
+  };
+
+  outputs = { self, nixpkgs, zfs-backup, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        { nixpkgs.overlays = [ zfs-backup.overlays.default ]; }
+        ./configuration.nix
+      ];
+    };
+  };
+}
+```
+
+Then in `configuration.nix`:
+
+```nix
+{ config, pkgs, ... }:
+{
+  environment.systemPackages = [ pkgs.zfs-backup ];
+}
+```
+
+### Run Without Installing
 
 ```bash
 nix run github:timlinux/zfs-backup
