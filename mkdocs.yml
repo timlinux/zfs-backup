@@ -1,0 +1,85 @@
+site_name: Kartoza ZFS Backup Tool
+site_description: A beautiful TUI for managing ZFS backups
+site_author: Tim Sutton / Kartoza
+site_url: https://kartoza.github.io/zfs-backup/
+
+repo_name: kartoza/zfs-backup
+repo_url: https://github.com/kartoza/zfs-backup
+
+copyright: Copyright &copy; 2024 Kartoza
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+    - content.code.copy
+  icon:
+    repo: fontawesome/brands/github
+  logo: assets/images/kartoza-zfs-backup.png
+  favicon: assets/images/kartoza-zfs-backup.png
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - admonition
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  - minify:
+      minify_html: true
+
+nav:
+  - Home: index.md
+  - User Guide:
+    - Getting Started: user-guide/getting-started.md
+    - Backup Operations: user-guide/backup-operations.md
+    - Keyboard Shortcuts: user-guide/keyboard-shortcuts.md
+  - Administrator Guide:
+    - Installation: admin-guide/installation.md
+    - Configuration: admin-guide/configuration.md
+    - ZFS Delegation: admin-guide/zfs-delegation.md
+  - Developer Guide:
+    - Architecture: developer-guide/architecture.md
+    - Building: developer-guide/building.md
+    - Contributing: developer-guide/contributing.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/kartoza/zfs-backup
+    - icon: fontawesome/solid/globe
+      link: https://kartoza.com
+  generator: false

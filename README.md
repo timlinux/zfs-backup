@@ -1,14 +1,8 @@
-# 🗄️ ZFS Backup
+# 🗄️ Kartoza ZFS Backup Tool
 
 A beautiful TUI (Terminal User Interface) for managing ZFS backups, built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lipgloss](https://github.com/charmbracelet/lipgloss).
 
-
-
-Please note that this backup tool is pretty specific to my systems which have a
-pool called NIXROOT and the external drive is prepared with a pool called
-NIXBACKUPS.
-
-![ZFS Backup Screenshot](https://via.placeholder.com/800x400.png?text=ZFS+Backup+TUI)
+![Kartoza ZFS Backup Screenshot](kartoza-zfs-backup.png)
 
 ## Features
 
@@ -21,10 +15,10 @@ NIXBACKUPS.
 
 ## Requirements
 
-- ZFS filesystem with `NIXROOT` pool
+- ZFS filesystem with at least one pool (source)
 - [syncoid](https://github.com/jimsalterjrs/sanoid) (from sanoid package)
 - Root privileges (via sudo) OR ZFS delegation configured for your user
-- External drive for `NIXBACKUPS` pool
+- External drive with an encrypted ZFS pool (destination)
 
 ## Installation
 
@@ -269,3 +263,7 @@ Tim Sutton ([@timlinux](https://github.com/timlinux))
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+---
+
+Made with 💗 by [Kartoza](https://kartoza.com) | [Donate!](https://github.com/sponsors/kartoza) | [GitHub](https://github.com/kartoza/zfs-backup)
