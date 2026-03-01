@@ -53,6 +53,48 @@ The tool supports vim-style navigation:
 | ++j++ | ++arrow-down++ |
 | ++k++ | ++arrow-up++ |
 
+## Restore Mode Shortcuts
+
+In the dual-panel restore explorer, additional shortcuts are available:
+
+### Panel Navigation
+
+| Key | Action |
+|-----|--------|
+| ++h++ / ++arrow-left++ | Focus left panel |
+| ++l++ / ++arrow-right++ | Focus right panel |
+| ++tab++ | Switch panel focus |
+| ++enter++ | Enter directory/snapshot |
+| ++backspace++ / ++-++ | Go up / back |
+
+### File Selection
+
+| Key | Action |
+|-----|--------|
+| ++space++ | Toggle file selection |
+| ++a++ | Select all files |
+| ++c++ | Clear selection |
+| ++y++ | Yank (copy) selected files |
+
+### Browse & Sort
+
+| Key | Action |
+|-----|--------|
+| ++slash++ | Search files |
+| ++s++ | Cycle sort mode (Name/Date/Size) |
+| ++r++ | Reverse sort order |
+| ++g++ | Go to top |
+| ++shift+g++ | Go to bottom |
+| ++ctrl+u++ | Page up |
+| ++ctrl+d++ | Page down |
+
+### Exit
+
+| Key | Action |
+|-----|--------|
+| ++u++ | Unmount and power off |
+| ++q++ / ++escape++ | Return to menu |
+
 ---
 
 Made with :heart: by [Kartoza](https://kartoza.com) | [Donate!](https://github.com/sponsors/kartoza) | [GitHub](https://github.com/kartoza/zfs-backup)

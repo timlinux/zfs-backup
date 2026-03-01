@@ -24,6 +24,12 @@ Kartoza ZFS Backup Tool provides an intuitive terminal interface for managing ZF
 
     Destructive backup option for when incremental chains are broken. Resets the backup to match your current source state.
 
+-   :material-download: **Restore Files**
+
+    ---
+
+    Dual-panel file explorer for browsing snapshots and restoring files. Vim/yazi-style keybindings for efficient navigation.
+
 -   :material-wrench: **Device Preparation**
 
     ---

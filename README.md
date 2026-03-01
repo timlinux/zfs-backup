@@ -8,6 +8,7 @@ A beautiful TUI (Terminal User Interface) for managing ZFS backups, built with [
 
 - 📦 **Incremental Backups** - Efficient snapshots with syncoid integration
 - 🔥 **Force Backup** - Destructive backup option for out-of-sync scenarios
+- 📥 **Restore Files** - Dual-panel file explorer to browse snapshots and restore files
 - 🔧 **Device Preparation** - Create encrypted ZFS pools with AES-256-GCM
 - 🔌 **Safe Unmounting** - Properly export pools and power off USB drives
 - 🎨 **Beautiful TUI** - Intuitive interface with progress indicators and styled output
@@ -174,6 +175,16 @@ Creates an encrypted ZFS pool on a new external drive:
 
 ⚠️ **Warning**: This will erase all data on the device!
 
+### 📥 Restore Files
+
+Browse snapshots and restore files using a dual-panel file explorer:
+
+- Select source pool (containing snapshots) and destination
+- View all snapshots with timestamps and sizes
+- Navigate into snapshots to browse files
+- Select files with spacebar, copy with 'y' (yank)
+- Vim/yazi-style keybindings (hjkl, g/G, Ctrl+u/d)
+
 ### 🔌 Unmount Backup Disk
 
 Safely exports the NIXBACKUPS pool and powers off the USB drive. Always use this before unplugging the backup drive to prevent data corruption.
@@ -203,14 +214,30 @@ sudo zpool set delegation=on NIXBACKUPS
 
 ## Keyboard Shortcuts
 
+### Main Menu
+
 | Key | Action |
 |-----|--------|
-| ↑/↓ | Navigate menu |
+| ↑/k ↓/j | Navigate menu |
 | Enter | Select option |
 | y/n | Confirm/Cancel |
 | Esc | Go back |
 | q | Quit application |
 | Ctrl+C | Force quit |
+
+### Restore Mode
+
+| Key | Action |
+|-----|--------|
+| h/l or Tab | Switch panels |
+| j/k | Navigate up/down |
+| Enter | Enter directory/snapshot |
+| Space | Toggle file selection |
+| y | Yank (copy) selected files |
+| / | Search |
+| s | Cycle sort mode |
+| u | Unmount and power off |
+| q/Esc | Return to menu |
 
 ## Development
 
@@ -233,6 +260,8 @@ go build
 zfs-backup/
 ├── main.go       # Bubble Tea TUI and main application logic
 ├── zfs.go        # ZFS operations (backup, prepare, unmount)
+├── state.go      # Backup state management for resume
+├── restore.go    # Restore mode with dual-panel explorer
 ├── package.nix   # Nix package definition
 ├── flake.nix     # Nix flake configuration
 └── go.mod        # Go module dependencies

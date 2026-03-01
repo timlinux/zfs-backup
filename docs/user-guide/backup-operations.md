@@ -125,6 +125,79 @@ Pool: [Your chosen name]
 
 ---
 
+## Restore Files
+
+Browse your ZFS snapshots and restore files to any location using a dual-panel file explorer.
+
+### How It Works
+
+```mermaid
+graph LR
+    A[Select Source Pool] --> B[Select Destination]
+    B --> C[Browse Snapshots]
+    C --> D[Navigate Files]
+    D --> E[Select Files]
+    E --> F[Yank to Copy]
+    F --> G[Unmount & Exit]
+```
+
+### Key Features
+
+- **Dual-panel explorer** - Midnight Commander-style interface
+- **Snapshot browser** - View all snapshots with creation date and size
+- **File browser** - Navigate directories within mounted snapshots
+- **Multi-file selection** - Select multiple files with spacebar
+- **Vim/yazi keybindings** - Familiar navigation for keyboard users
+
+### Workflow
+
+1. **Select Source Pool** - Choose the pool containing snapshots to restore from
+2. **Select Destination** - Choose where to restore files to (can be any mounted location)
+3. **Browse Snapshots** - The left panel shows all available snapshots, newest first
+4. **Enter a Snapshot** - Press Enter to mount and browse files within the snapshot
+5. **Navigate** - Use hjkl or arrow keys to navigate; Tab switches panels
+6. **Select Files** - Press Space to select/deselect files
+7. **Copy Files** - Press `y` to yank (copy) selected files to the destination
+8. **Unmount** - Press `u` to safely unmount and power off the source drive
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `h`/`←` | Move left / Focus left panel |
+| `j`/`↓` | Move down |
+| `k`/`↑` | Move up |
+| `l`/`→` | Move right / Focus right panel |
+| `Tab` | Switch panel focus |
+| `Enter` | Enter directory/snapshot |
+| `Backspace`/`-` | Go up/back |
+| `Space` | Toggle file selection |
+| `a` | Select all files |
+| `c` | Clear selection |
+| `y` | Yank (copy) selected files |
+| `/` | Search |
+| `s` | Cycle sort mode (Name/Date/Size) |
+| `r` | Reverse sort order |
+| `g` | Go to top |
+| `G` | Go to bottom |
+| `Ctrl+u` | Page up |
+| `Ctrl+d` | Page down |
+| `u` | Unmount and power off |
+| `q`/`Esc` | Return to menu |
+
+### Tips
+
+!!! tip "Efficient Restoring"
+    Use `Space` to mark multiple files, then `y` once to copy all of them.
+
+!!! info "Snapshot Mounting"
+    Snapshots are mounted read-only to a temporary location. This ensures the original backup data cannot be accidentally modified.
+
+!!! warning "Overwrite Confirmation"
+    If files already exist at the destination, you'll be asked to confirm before overwriting.
+
+---
+
 ## Unmount Backup Disk
 
 Safely exports the backup pool and powers off the USB drive.

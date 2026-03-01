@@ -18,6 +18,7 @@ zfs-backup/
 ├── main.go           # TUI application, views, and main logic
 ├── zfs.go            # ZFS operations (backup, prepare, unmount)
 ├── state.go          # Backup state management for resume
+├── restore.go        # Restore mode with dual-panel explorer
 ├── package.nix       # Nix package definition
 ├── module.nix        # NixOS module
 ├── flake.nix         # Nix flake configuration
@@ -124,6 +125,45 @@ Backup state persistence for resume functionality:
 - `ClearBackupState()` - Remove state file
 
 State is stored in: `~/.cache/zfs-backup/backup-state.json`
+
+### restore.go
+
+Restore mode with dual-panel file explorer:
+
+- `RestoreModel` - Restore mode state machine
+- `RestoreState` - States: pool selection, password, explorer, copying, complete
+- `FileEntry` - File/directory entry in browser
+- `SnapshotEntry` - ZFS snapshot representation
+
+#### Restore State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> SelectSource
+    SelectSource --> PasswordSource: Encrypted Pool
+    SelectSource --> SelectDest: Unlocked Pool
+    PasswordSource --> SelectDest: Unlocked
+    SelectDest --> PasswordDest: Encrypted Pool
+    SelectDest --> Explorer: Unlocked
+    PasswordDest --> Explorer: Unlocked
+    Explorer --> ConfirmOverwrite: Files Exist
+    Explorer --> Copying: No Conflicts
+    ConfirmOverwrite --> Copying: Confirmed
+    ConfirmOverwrite --> Explorer: Cancelled
+    Copying --> Complete: Done
+    Complete --> [*]: Exit
+    Explorer --> [*]: Quit
+```
+
+#### Dual-Panel Explorer
+
+The explorer uses a Midnight Commander-style layout:
+
+- **Left Panel** - Snapshots list or file browser within a snapshot
+- **Right Panel** - Destination file browser
+- **Status Bar** - Selection info, sort mode, search
+
+Navigation follows vim/yazi conventions (hjkl, g/G, Ctrl+u/d, etc.)
 
 ## Data Flow
 

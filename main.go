@@ -25,6 +25,7 @@ const (
 	kartozaURL  = "https://kartoza.com"
 	donateURL   = "https://github.com/sponsors/kartoza"
 	githubURL   = "https://github.com/kartoza/zfs-backup"
+	docsURL     = "https://kartoza.github.io/zfs-backup"
 )
 
 // Kartoza brand colors
@@ -376,6 +377,7 @@ const (
 	stateResult
 	stateHelp
 	stateResume
+	stateRestore
 )
 
 type menuItem struct {
@@ -387,11 +389,13 @@ type menuItem struct {
 // Simple menu items for main menu
 var mainMenuItems = []menuItem{
 	{title: "Backup ZFS (incremental)", description: "Run incremental backup from source to destination pool using syncoid", icon: "📦"},
-	{title: "Force Backup ZFS (destructive)", description: "⚠️ DESTRUCTIVE - Deletes old snapshots on backup disk and forces full sync", icon: "🔥"},
-	{title: "Prepare Backup Device", description: "Create an encrypted ZFS pool on a new external backup device", icon: "🔧"},
+	{title: "Restore Files", description: "Browse snapshots and restore files to any location", icon: "📥"},
 	{title: "Unmount Backup Disk", description: "Safely export the backup pool and power off the USB drive", icon: "🔌"},
 	{title: "Help", description: "Show detailed help information about all operations", icon: "❓"},
 	{title: "Exit", description: "Exit the application", icon: "❌"},
+	{title: "---", description: "Danger Zone", icon: ""},  // Separator
+	{title: "Prepare Backup Device", description: "⚠️ DESTRUCTIVE - Create an encrypted ZFS pool on a new external backup device", icon: "🔧"},
+	{title: "Force Backup ZFS (destructive)", description: "⚠️ DESTRUCTIVE - Deletes old snapshots on backup disk and forces full sync", icon: "🔥"},
 }
 
 type model struct {
@@ -427,6 +431,8 @@ type model struct {
 	selectingSource  bool      // true = selecting source, false = selecting dest
 	// Progress channel for real-time updates
 	progressChan     chan progressUpdate
+	// Restore mode
+	restoreModel     RestoreModel
 }
 
 func initialModel() model {
@@ -561,9 +567,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Pass to restore model if in restore state
+		if m.state == stateRestore {
+			m.restoreModel.width = msg.Width
+			m.restoreModel.height = msg.Height
+		}
 		return m, nil
 
 	case tea.KeyMsg:
+		// Handle restore mode - delegate to restore model
+		if m.state == stateRestore {
+			var cmd tea.Cmd
+			m.restoreModel, cmd = m.restoreModel.Update(msg)
+			// Check if restore mode wants to exit
+			if m.restoreModel.done {
+				m.state = stateMenu
+				m.restoreModel = RestoreModel{}
+				if !m.restoreModel.returnToMenu {
+					return m, tea.Quit
+				}
+				return m, nil
+			}
+			return m, cmd
+		}
+
 		// Handle pool selection state
 		if m.selectingPool {
 			switch msg.String() {
@@ -611,6 +638,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Handle help screen first (before menu)
+		if m.showingHelp {
+			switch msg.String() {
+			case "enter", "esc", "q":
+				m.showingHelp = false
+				return m, nil
+			case "ctrl+c":
+				m.quitting = true
+				return m, tea.Quit
+			case "D":
+				// Open online documentation
+				return m, openURL(docsURL)
+			}
+			return m, nil
+		}
+
 		if m.state == stateMenu {
 			switch msg.String() {
 			case "ctrl+c", "q":
@@ -620,12 +663,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "up", "k":
 				if m.menuIndex > 0 {
 					m.menuIndex--
+					// Skip separator
+					if mainMenuItems[m.menuIndex].title == "---" {
+						if m.menuIndex > 0 {
+							m.menuIndex--
+						} else {
+							m.menuIndex++
+						}
+					}
 				}
 				return m, nil
 
 			case "down", "j":
 				if m.menuIndex < len(mainMenuItems)-1 {
 					m.menuIndex++
+					// Skip separator
+					if mainMenuItems[m.menuIndex].title == "---" {
+						if m.menuIndex < len(mainMenuItems)-1 {
+							m.menuIndex++
+						} else {
+							m.menuIndex--
+						}
+					}
 				}
 				return m, nil
 
@@ -656,6 +715,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectingPool = true
 					m.selectingSource = true
 					m.poolSelectIndex = 0
+					return m, nil
+				case "Restore Files":
+					// Enter restore mode
+					m.state = stateRestore
+					m.restoreModel = NewRestoreModel()
+					m.restoreModel.width = m.width
+					m.restoreModel.height = m.height
 					return m, nil
 				case "Force Backup ZFS (destructive)":
 					m.state = stateConfirm
@@ -777,11 +843,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.quitting = true
 				return m, tea.Quit
 			}
-		} else if m.state == stateResult || m.showingHelp {
+		} else if m.state == stateResult {
 			switch msg.String() {
 			case "enter", "esc", "q":
 				m.state = stateMenu
-				m.showingHelp = false
 				return m, nil
 			case "ctrl+c":
 				m.quitting = true
@@ -793,6 +858,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
+
+	// Handle restore mode messages
+	case snapshotsLoadedMsg, filesLoadedMsg, snapshotMountedMsg, copyProgressMsg, poolUnlockedMsg, unmountCompleteMsg:
+		if m.state == stateRestore {
+			var cmd tea.Cmd
+			m.restoreModel, cmd = m.restoreModel.Update(msg)
+			if m.restoreModel.done {
+				m.state = stateMenu
+				m.restoreModel = RestoreModel{}
+			}
+			return m, cmd
+		}
 
 	case progressMsg:
 		m.currentStage = msg.stage
@@ -832,6 +909,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickEvery()
 
 	case progress.FrameMsg:
+		// Handle progress for restore mode too
+		if m.state == stateRestore {
+			var cmd tea.Cmd
+			m.restoreModel, cmd = m.restoreModel.Update(msg)
+			return m, cmd
+		}
 		progressModel, cmd := m.progress.Update(msg)
 		m.progress = progressModel.(progress.Model)
 		return m, cmd
@@ -876,6 +959,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	if m.quitting {
 		return statusStyle.Render("👋 Goodbye!\n")
+	}
+
+	// Restore mode has its own full view
+	if m.state == stateRestore {
+		return m.restoreModel.View()
 	}
 
 	// Use a reasonable default if width/height is not set
@@ -956,6 +1044,8 @@ func (m model) renderContentNopad(width int) string {
 		content.WriteString(m.renderResultContent(width))
 	case stateHelp:
 		content.WriteString(m.renderHelpContent(width))
+	case stateRestore:
+		// Restore mode has its own full view, handled in View()
 	}
 
 	return content.String()
@@ -973,6 +1063,16 @@ func (m model) renderMenuContent(width, height int) string {
 	// Render simple menu items - one line each
 	for i, item := range mainMenuItems {
 		var line string
+		if item.title == "---" {
+			// Separator - render danger zone header
+			separator := warningStyle.Render("──── ⚠️  Danger Zone ⚠️  ────")
+			centered := lipgloss.NewStyle().
+				Width(width).
+				Align(lipgloss.Center).
+				Render(separator)
+			b.WriteString("\n" + centered + "\n")
+			continue
+		}
 		if i == m.menuIndex {
 			// Selected item - highlighted
 			line = selectedItemStyle.Render(fmt.Sprintf("  ▶ %s %s", item.icon, item.title))
@@ -1341,6 +1441,9 @@ OPERATIONS
   🔥 Force Backup ZFS (destructive)
      Forces a complete backup by deleting previous snapshots.
 
+  📥 Restore Files
+     Browse snapshots and restore files to any location.
+
   🔧 Prepare Backup Device
      Creates an encrypted ZFS pool on a new external drive.
 
@@ -1351,7 +1454,13 @@ REQUIREMENTS
   • syncoid installed (from sanoid package)
   • ZFS filesystem with source pool
   • External drive for backup pool
-  • Root privileges (sudo) OR ZFS delegation configured`
+  • Root privileges (sudo) OR ZFS delegation configured
+
+DOCUMENTATION
+  Press D to open online documentation
+  https://kartoza.github.io/zfs-backup
+
+Press esc/enter/q to return to menu`
 
 	return lipgloss.NewStyle().
 		Width(width).
