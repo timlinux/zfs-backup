@@ -13,7 +13,7 @@ buildGoModule rec {
 
   src = ./.;
 
-  vendorHash = "sha256-AJMPqqlmE6eowNpgIiPi55Kv2KJ4ejnjgrrcgXicPbc=";
+  vendorHash = null;  # Use vendored dependencies from vendor/ directory
 
   # Runtime dependencies
   buildInputs = [
