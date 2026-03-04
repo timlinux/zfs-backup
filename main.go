@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -19,7 +20,7 @@ import (
 const (
 	appName    = "Kartoza ZFS Backup"
 	appTagline = "Keep your ZFS Backed Up!"
-	appVersion = "1.0.0"
+	appVersion = "1.2.0"
 
 	// URLs for footer links
 	kartozaURL  = "https://kartoza.com"
@@ -290,11 +291,11 @@ func renderFooter(width int, hotkeys string, currentPage, totalPages int) string
 	b.WriteString(line2 + "\n")
 
 	// Kartoza credit line with hotkeys - centered
-	// Format: Made with 💗 by [K]artoza │ D[o]nate! │ [G]itHub
+	// Format: Made with <3 by [K]artoza | D[o]nate! | [G]itHub
 	kartoza := selectedItemStyle.Render("K") + footerCreditStyle.Render("artoza")
 	donate := footerCreditStyle.Render("D") + selectedItemStyle.Render("o") + footerCreditStyle.Render("nate!")
 	github := selectedItemStyle.Render("G") + footerCreditStyle.Render("itHub")
-	credit := footerCreditStyle.Render("Made with 💗 by ") + kartoza +
+	credit := footerCreditStyle.Render("Made with <3 by ") + kartoza +
 		footerCreditStyle.Render(" │ ") + donate +
 		footerCreditStyle.Render(" │ ") + github
 
@@ -333,6 +334,10 @@ func (m model) getStatusText() string {
 		return "Help"
 	case stateResume:
 		return "Resume Available"
+	case stateZpoolInfo:
+		return "Pool Information"
+	case stateMaintenance:
+		return "Pool Maintenance"
 	default:
 		return "Idle"
 	}
@@ -353,8 +358,10 @@ func (m model) getHotkeys() string {
 		return "enter submit • esc cancel"
 	case stateRunning:
 		return "ctrl+c cancel (resumable)"
-	case stateResult, stateHelp:
+	case stateResult, stateHelp, stateZpoolInfo:
 		return "enter/esc return to menu"
+	case stateMaintenance:
+		return "s start scrub • x stop scrub • r refresh • esc return"
 	case stateResume:
 		return "y resume • n start fresh • esc back"
 	default:
@@ -378,6 +385,8 @@ const (
 	stateHelp
 	stateResume
 	stateRestore
+	stateZpoolInfo
+	stateMaintenance
 )
 
 type menuItem struct {
@@ -388,14 +397,16 @@ type menuItem struct {
 
 // Simple menu items for main menu
 var mainMenuItems = []menuItem{
-	{title: "Backup ZFS (incremental)", description: "Run incremental backup from source to destination pool using syncoid", icon: "📦"},
-	{title: "Restore Files", description: "Browse snapshots and restore files to any location", icon: "📥"},
-	{title: "Unmount Backup Disk", description: "Safely export the backup pool and power off the USB drive", icon: "🔌"},
-	{title: "Help", description: "Show detailed help information about all operations", icon: "❓"},
-	{title: "Exit", description: "Exit the application", icon: "❌"},
-	{title: "---", description: "Danger Zone", icon: ""},  // Separator
-	{title: "Prepare Backup Device", description: "⚠️ DESTRUCTIVE - Create an encrypted ZFS pool on a new external backup device", icon: "🔧"},
-	{title: "Force Backup ZFS (destructive)", description: "⚠️ DESTRUCTIVE - Deletes old snapshots on backup disk and forces full sync", icon: "🔥"},
+	{title: "Backup ZFS (incremental)", description: "Run incremental backup from source to destination pool using syncoid", icon: ""},
+	{title: "Restore Files", description: "Browse snapshots and restore files to any location", icon: ""},
+	{title: "Show zpool info", description: "Show detailed information about ZFS pool structure, status and health", icon: ""},
+	{title: "Pool Maintenance", description: "Start, stop, or monitor scrub operations for data integrity verification", icon: ""},
+	{title: "Unmount Backup Disk", description: "Safely export the backup pool and power off the USB drive", icon: ""},
+	{title: "Help", description: "Show detailed help information about all operations", icon: ""},
+	{title: "Exit", description: "Exit the application", icon: ""},
+	{title: "---", description: "Danger Zone", icon: ""}, // Separator
+	{title: "Prepare Backup Device", description: "DESTRUCTIVE - Create an encrypted ZFS pool on a new external backup device", icon: ""},
+	{title: "Force Backup ZFS (destructive)", description: "DESTRUCTIVE - Deletes old snapshots on backup disk and forces full sync", icon: ""},
 }
 
 type model struct {
@@ -433,6 +444,18 @@ type model struct {
 	progressChan     chan progressUpdate
 	// Restore mode
 	restoreModel     RestoreModel
+	// Zpool info viewer
+	zpoolInfoPool    string           // Selected pool for info display
+	zpoolViewport    viewport.Model   // Scrollable viewport for info
+	zpoolInfoReady   bool             // Is the viewport content ready?
+	// Maintenance
+	maintenancePool    string         // Selected pool for maintenance
+	maintenanceAction  string         // Current maintenance action
+	scrubProgress      string         // Current scrub progress info
+	maintenanceReady   bool           // Is maintenance info ready?
+	// Result viewport
+	resultViewport     viewport.Model // Scrollable viewport for result content
+	resultReady        bool           // Is result viewport ready?
 }
 
 func initialModel() model {
@@ -572,6 +595,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.restoreModel.width = msg.Width
 			m.restoreModel.height = msg.Height
 		}
+		// Update viewport size if in zpool info state
+		if m.state == stateZpoolInfo && m.zpoolInfoReady {
+			viewportHeight := msg.Height - 12
+			if viewportHeight < 5 {
+				viewportHeight = 5
+			}
+			viewportWidth := msg.Width - 8
+			if viewportWidth < 40 {
+				viewportWidth = 40
+			}
+			m.zpoolViewport.Width = viewportWidth
+			m.zpoolViewport.Height = viewportHeight
+		}
+		// Update viewport size if in result state
+		if m.state == stateResult && m.resultReady {
+			viewportHeight := msg.Height - 12
+			if viewportHeight < 5 {
+				viewportHeight = 5
+			}
+			viewportWidth := msg.Width - 8
+			if viewportWidth < 40 {
+				viewportWidth = 40
+			}
+			m.resultViewport.Width = viewportWidth
+			m.resultViewport.Height = viewportHeight
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -622,7 +671,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else {
 						m.destPool = selectedPool
 						m.selectingPool = false
-						// Proceed to password
+
+						// Handle zpoolinfo and maintenance operations specially
+						if m.operation == "zpoolinfo" || m.operation == "maintenance" {
+							if m.operation == "zpoolinfo" {
+								m.zpoolInfoPool = selectedPool
+							} else {
+								m.maintenancePool = selectedPool
+							}
+							// Use async command to import pool if needed and check encryption
+							return m, m.preparePoolAccess(selectedPool)
+						}
+
+						// For other operations, proceed to password
 						m.state = statePassword
 						m.passwordInput.SetValue("")
 						m.passwordInput.Focus()
@@ -725,7 +786,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				case "Force Backup ZFS (destructive)":
 					m.state = stateConfirm
-					m.confirmMsg = "⚠️  This will delete all previous snapshots on the backup disk.\nAre you sure you want to continue?"
+					m.confirmMsg = "WARNING: This will delete all previous snapshots on the backup disk.\nAre you sure you want to continue?"
 					m.operation = "force-backup"
 					m.confirmYes = false
 					return m, nil
@@ -734,6 +795,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.operation = "prepare"
 					m.input.SetValue("")
 					return m, textinput.Blink
+				case "Show zpool info":
+					m.operation = "zpoolinfo"
+					m.availablePools = getAllPools()
+					m.selectingPool = true
+					m.selectingSource = false // Only need to select one pool
+					m.poolSelectIndex = 0
+					return m, nil
+				case "Pool Maintenance":
+					m.operation = "maintenance"
+					m.availablePools = getAllPools()
+					m.selectingPool = true
+					m.selectingSource = false // Only need to select one pool
+					m.poolSelectIndex = 0
+					return m, nil
 				case "Unmount Backup Disk":
 					// For unmount, go to pool selection for destination only
 					m.operation = "unmount"
@@ -780,7 +855,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.input.Value() != "" {
 					m.devicePath = m.input.Value()
 					m.state = stateConfirm
-					m.confirmMsg = fmt.Sprintf("⚠️  WARNING: You are about to erase all data on %s.\nThis action is irreversible!\nAre you absolutely sure?", m.input.Value())
+					m.confirmMsg = fmt.Sprintf("WARNING: You are about to erase all data on %s.\nThis action is irreversible!\nAre you absolutely sure?", m.input.Value())
 					m.confirmYes = false
 					return m, nil
 				}
@@ -796,6 +871,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if m.passwordInput.Value() != "" {
 					m.password = m.passwordInput.Value()
+					// Handle zpoolinfo and maintenance operations specially
+					if m.operation == "zpoolinfo" {
+						return m, m.unlockAndLoadZpoolInfo()
+					}
+					if m.operation == "maintenance" {
+						return m, m.unlockAndLoadMaintenance()
+					}
 					return m.startOperation()
 				}
 			case "esc":
@@ -819,7 +901,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					_ = SaveBackupState(m.backupState)
 				}
 				m.state = stateResult
-				m.message = "⚠️  Backup cancelled. You can resume later by starting a new backup."
+				m.message = "Backup cancelled. You can resume later by starting a new backup."
 				m.err = nil
 				m.cancelFunc = nil
 				return m, nil
@@ -847,10 +929,57 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "enter", "esc", "q":
 				m.state = stateMenu
+				m.resultReady = false
 				return m, nil
 			case "ctrl+c":
 				m.quitting = true
 				return m, tea.Quit
+			default:
+				// Pass other keys to viewport for scrolling
+				if m.resultReady {
+					var cmd tea.Cmd
+					m.resultViewport, cmd = m.resultViewport.Update(msg)
+					return m, cmd
+				}
+			}
+		} else if m.state == stateZpoolInfo {
+			switch msg.String() {
+			case "esc", "q":
+				m.state = stateMenu
+				m.zpoolInfoReady = false
+				return m, nil
+			case "ctrl+c":
+				m.quitting = true
+				return m, tea.Quit
+			default:
+				// Pass other keys to viewport for scrolling
+				var cmd tea.Cmd
+				m.zpoolViewport, cmd = m.zpoolViewport.Update(msg)
+				return m, cmd
+			}
+		} else if m.state == stateMaintenance {
+			switch msg.String() {
+			case "esc", "q":
+				m.state = stateMenu
+				m.maintenanceReady = false
+				return m, nil
+			case "ctrl+c":
+				m.quitting = true
+				return m, tea.Quit
+			case "s", "S":
+				// Start scrub
+				return m, m.startScrub()
+			case "x", "X":
+				// Stop scrub
+				return m, m.stopScrub()
+			case "r", "R":
+				// Refresh status
+				return m, m.loadMaintenanceStatus()
+			default:
+				// Pass other keys to viewport for scrolling
+				var cmd tea.Cmd
+				m.zpoolViewport, cmd = m.zpoolViewport.Update(msg)
+				return m, cmd
 			}
 		}
 
@@ -908,6 +1037,91 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tickEvery()
 
+	case zpoolInfoLoadedMsg:
+		if msg.err != nil {
+			m.state = stateResult
+			m.err = msg.err
+			m.message = ""
+			return m, nil
+		}
+		// Set up viewport with the content
+		m.state = stateZpoolInfo
+		m.zpoolInfoReady = true
+		// Calculate viewport height (leave room for header, title, and footer)
+		viewportHeight := m.height - 12
+		if viewportHeight < 5 {
+			viewportHeight = 5
+		}
+		viewportWidth := m.width - 8
+		if viewportWidth < 40 {
+			viewportWidth = 40
+		}
+		m.zpoolViewport = viewport.New(viewportWidth, viewportHeight)
+		m.zpoolViewport.SetContent(msg.content)
+		m.zpoolViewport.Style = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorHighlight4).
+			Padding(0, 1)
+		return m, nil
+
+	case poolReadyMsg:
+		if msg.err != nil {
+			m.state = stateResult
+			m.err = msg.err
+			m.message = ""
+			return m, nil
+		}
+		// Pool is imported, now check if it needs unlocking
+		if needsUnlock, _ := poolNeedsUnlock(msg.pool); needsUnlock {
+			m.state = statePassword
+			m.passwordInput.SetValue("")
+			m.passwordInput.Focus()
+			return m, textinput.Blink
+		}
+		// No password needed, proceed to load info/maintenance
+		if m.operation == "zpoolinfo" {
+			return m, m.loadZpoolInfo()
+		}
+		return m, m.loadMaintenanceStatus()
+
+	case maintenanceStatusMsg:
+		if msg.err != nil {
+			m.state = stateResult
+			m.err = msg.err
+			m.message = ""
+			return m, nil
+		}
+		// Set up viewport with the content
+		m.state = stateMaintenance
+		m.maintenanceReady = true
+		m.scrubProgress = msg.content
+		// Calculate viewport height
+		viewportHeight := m.height - 14
+		if viewportHeight < 5 {
+			viewportHeight = 5
+		}
+		viewportWidth := m.width - 8
+		if viewportWidth < 40 {
+			viewportWidth = 40
+		}
+		m.zpoolViewport = viewport.New(viewportWidth, viewportHeight)
+		m.zpoolViewport.SetContent(msg.content)
+		m.zpoolViewport.Style = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorHighlight4).
+			Padding(0, 1)
+		return m, nil
+
+	case scrubActionMsg:
+		if msg.err != nil {
+			m.state = stateResult
+			m.err = msg.err
+			m.message = ""
+			return m, nil
+		}
+		// Refresh the maintenance status after scrub action
+		return m, m.loadMaintenanceStatus()
+
 	case progress.FrameMsg:
 		// Handle progress for restore mode too
 		if m.state == stateRestore {
@@ -935,6 +1149,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateResult
 		m.message = msg.message
 		m.err = msg.err
+
+		// Set up viewport for scrollable result display
+		viewportHeight := m.height - 12
+		if viewportHeight < 5 {
+			viewportHeight = 5
+		}
+		viewportWidth := m.width - 8
+		if viewportWidth < 40 {
+			viewportWidth = 40
+		}
+		m.resultViewport = viewport.New(viewportWidth, viewportHeight)
+		m.resultViewport.SetContent(msg.message)
+		m.resultViewport.Style = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorHighlight4).
+			Padding(0, 1)
+		m.resultReady = true
 		m.backupState = nil
 
 		// Clear state file if successful
@@ -958,7 +1189,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	if m.quitting {
-		return statusStyle.Render("👋 Goodbye!\n")
+		return statusStyle.Render("Goodbye!\n")
 	}
 
 	// Restore mode has its own full view
@@ -1044,6 +1275,10 @@ func (m model) renderContentNopad(width int) string {
 		content.WriteString(m.renderResultContent(width))
 	case stateHelp:
 		content.WriteString(m.renderHelpContent(width))
+	case stateZpoolInfo:
+		content.WriteString(m.renderZpoolInfoContent(width))
+	case stateMaintenance:
+		content.WriteString(m.renderMaintenanceContent(width))
 	case stateRestore:
 		// Restore mode has its own full view, handled in View()
 	}
@@ -1065,7 +1300,7 @@ func (m model) renderMenuContent(width, height int) string {
 		var line string
 		if item.title == "---" {
 			// Separator - render danger zone header
-			separator := warningStyle.Render("──── ⚠️  Danger Zone ⚠️  ────")
+			separator := warningStyle.Render("──── Danger Zone ────")
 			centered := lipgloss.NewStyle().
 				Width(width).
 				Align(lipgloss.Center).
@@ -1194,7 +1429,7 @@ func (m model) renderConfirmContent(width int) string {
 			Width(width - 4).
 			Align(lipgloss.Center).
 			Render(destructiveWarningStyle.Render(
-				"⚠️  DESTRUCTIVE OPERATION WARNING ⚠️\n\n" +
+				"DESTRUCTIVE OPERATION WARNING\n\n" +
 					m.confirmMsg + "\n\n" +
 					"THIS ACTION CANNOT BE UNDONE!"))
 		b.WriteString(warningBox + "\n\n")
@@ -1216,7 +1451,7 @@ func (m model) renderInputContent(width int) string {
 	contentTitle := lipgloss.NewStyle().
 		Width(width).
 		Align(lipgloss.Center).
-		Render(selectedItemStyle.Render("🔧 Prepare Backup Device"))
+		Render(selectedItemStyle.Render("Prepare Backup Device"))
 	b.WriteString(contentTitle + "\n\n")
 
 	prompt := lipgloss.NewStyle().
@@ -1248,7 +1483,7 @@ func (m model) renderPasswordContent(width int) string {
 	contentTitle := lipgloss.NewStyle().
 		Width(width).
 		Align(lipgloss.Center).
-		Render(selectedItemStyle.Render("🔐 Encryption Password"))
+		Render(selectedItemStyle.Render("Encryption Password"))
 	b.WriteString(contentTitle + "\n\n")
 
 	poolInfo := m.destPool
@@ -1285,7 +1520,7 @@ func (m model) renderRunningContent(width int) string {
 	contentTitle := lipgloss.NewStyle().
 		Width(width).
 		Align(lipgloss.Center).
-		Render(selectedItemStyle.Render("⚙️  Backup in Progress"))
+		Render(selectedItemStyle.Render("Backup in Progress"))
 	b.WriteString(contentTitle + "\n\n")
 
 	// Current stage with spinner
@@ -1352,7 +1587,7 @@ func (m model) renderResumeContent(width int) string {
 	contentTitle := lipgloss.NewStyle().
 		Width(width).
 		Align(lipgloss.Center).
-		Render(selectedItemStyle.Render("📥 Resume Previous Backup"))
+		Render(selectedItemStyle.Render("Resume Previous Backup"))
 	b.WriteString(contentTitle + "\n\n")
 
 	if m.resumeState != nil {
@@ -1396,34 +1631,51 @@ func (m model) renderResumeContent(width int) string {
 	return b.String()
 }
 
-// renderResultContent renders the operation result
+// renderResultContent renders the operation result in a scrollable viewport
 func (m model) renderResultContent(width int) string {
 	var b strings.Builder
 
 	if m.err != nil {
+		// Error display - simple centered message
 		contentTitle := lipgloss.NewStyle().
 			Width(width).
 			Align(lipgloss.Center).
-			Render(errorStyle.Render("❌ Operation Failed"))
+			Render(errorStyle.Render("Operation Failed"))
 		b.WriteString(contentTitle + "\n\n")
 
 		errMsg := lipgloss.NewStyle().
 			Width(width).
 			Align(lipgloss.Center).
 			Render(errorStyle.Render(m.err.Error()))
-		b.WriteString(errMsg + "\n")
+		b.WriteString(errMsg + "\n\n")
+
+		hint := subtitleStyle.Render("Press enter/esc/q to return to menu")
+		b.WriteString(lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(hint))
 	} else {
+		// Success display - scrollable viewport for long reports
 		contentTitle := lipgloss.NewStyle().
 			Width(width).
 			Align(lipgloss.Center).
-			Render(statusStyle.Render("✅ Operation Completed"))
+			Render(statusStyle.Render("Operation Completed"))
 		b.WriteString(contentTitle + "\n\n")
 
-		msg := lipgloss.NewStyle().
-			Width(width).
-			Align(lipgloss.Center).
-			Render(statusStyle.Render(m.message))
-		b.WriteString(msg + "\n")
+		if m.resultReady {
+			// Viewport with scrollable content
+			b.WriteString(m.resultViewport.View())
+			b.WriteString("\n")
+
+			// Footer with scroll info
+			scrollInfo := subtitleStyle.Render(fmt.Sprintf(
+				"Scroll: j/k or arrows | %d%% | enter/esc/q to return",
+				int(m.resultViewport.ScrollPercent()*100)))
+			b.WriteString(lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(scrollInfo))
+		} else {
+			msg := lipgloss.NewStyle().
+				Width(width).
+				Align(lipgloss.Center).
+				Render(statusStyle.Render(m.message))
+			b.WriteString(msg + "\n")
+		}
 	}
 
 	return b.String()
@@ -1435,19 +1687,25 @@ func (m model) renderHelpContent(width int) string {
   A beautiful TUI for managing ZFS backups.
 
 OPERATIONS
-  📦 Backup ZFS (incremental)
+  Backup ZFS (incremental)
      Performs an incremental backup using syncoid.
 
-  🔥 Force Backup ZFS (destructive)
+  Force Backup ZFS (destructive)
      Forces a complete backup by deleting previous snapshots.
 
-  📥 Restore Files
+  Restore Files
      Browse snapshots and restore files to any location.
 
-  🔧 Prepare Backup Device
+  Show zpool info
+     Displays detailed pool structure, status and health.
+
+  Pool Maintenance
+     Start, stop, or monitor scrub operations for data integrity.
+
+  Prepare Backup Device
      Creates an encrypted ZFS pool on a new external drive.
 
-  🔌 Unmount Backup Disk
+  Unmount Backup Disk
      Safely exports the pool and powers off the USB drive.
 
 REQUIREMENTS
@@ -1466,6 +1724,363 @@ Press esc/enter/q to return to menu`
 		Width(width).
 		Align(lipgloss.Center).
 		Render(reportBoxStyle.Render(help))
+}
+
+// loadZpoolInfo returns a command that fetches zpool info asynchronously
+func (m model) loadZpoolInfo() tea.Cmd {
+	pool := m.zpoolInfoPool
+	return func() tea.Msg {
+		var info strings.Builder
+
+		// Header with pool name
+		info.WriteString(fmt.Sprintf("Pool: %s\n", pool))
+		info.WriteString(strings.Repeat("=", 70) + "\n\n")
+
+		// Get zpool status for this specific pool
+		info.WriteString("STATUS\n")
+		info.WriteString(strings.Repeat("-", 70) + "\n")
+		statusCmd := exec.Command("zpool", "status", pool)
+		statusOutput, err := statusCmd.Output()
+		if err != nil {
+			info.WriteString("Error: " + err.Error() + "\n")
+		} else {
+			info.WriteString(string(statusOutput))
+		}
+
+		// Get zpool list for this specific pool
+		info.WriteString("\nUSAGE\n")
+		info.WriteString(strings.Repeat("-", 70) + "\n")
+		listCmd := exec.Command("zpool", "list", "-v", pool)
+		listOutput, err := listCmd.Output()
+		if err != nil {
+			info.WriteString("Error: " + err.Error() + "\n")
+		} else {
+			info.WriteString(string(listOutput))
+		}
+
+		// Get datasets for this pool
+		info.WriteString("\nDATASETS\n")
+		info.WriteString(strings.Repeat("-", 70) + "\n")
+		zfsCmd := exec.Command("zfs", "list", "-r", "-o", "name,used,avail,refer,mountpoint", pool)
+		zfsOutput, err := zfsCmd.Output()
+		if err != nil {
+			info.WriteString("Error: " + err.Error() + "\n")
+		} else {
+			info.WriteString(string(zfsOutput))
+		}
+
+		// Get snapshots for this pool
+		info.WriteString("\nSNAPSHOTS\n")
+		info.WriteString(strings.Repeat("-", 70) + "\n")
+		snapCmd := exec.Command("zfs", "list", "-r", "-t", "snapshot", "-o", "name,used,refer,creation", pool)
+		snapOutput, err := snapCmd.Output()
+		if err != nil {
+			info.WriteString("No snapshots or error: " + err.Error() + "\n")
+		} else {
+			output := strings.TrimSpace(string(snapOutput))
+			if output == "" {
+				info.WriteString("No snapshots found.\n")
+			} else {
+				info.WriteString(output + "\n")
+			}
+		}
+
+		return zpoolInfoLoadedMsg{content: info.String()}
+	}
+}
+
+// unlockAndLoadZpoolInfo unlocks the pool and then loads the info
+func (m model) unlockAndLoadZpoolInfo() tea.Cmd {
+	pool := m.zpoolInfoPool
+	password := m.password
+	return func() tea.Msg {
+		// Try to unlock the pool
+		cmd := exec.Command("zfs", "load-key", pool)
+		cmd.Stdin = strings.NewReader(password + "\n")
+		if err := cmd.Run(); err != nil {
+			return zpoolInfoLoadedMsg{err: fmt.Errorf("failed to unlock pool: %w", err)}
+		}
+
+		// Now fetch the info
+		var info strings.Builder
+
+		// Header with pool name
+		info.WriteString(fmt.Sprintf("Pool: %s\n", pool))
+		info.WriteString(strings.Repeat("=", 70) + "\n\n")
+
+		// Get zpool status for this specific pool
+		info.WriteString("STATUS\n")
+		info.WriteString(strings.Repeat("-", 70) + "\n")
+		statusCmd := exec.Command("zpool", "status", pool)
+		statusOutput, err := statusCmd.Output()
+		if err != nil {
+			info.WriteString("Error: " + err.Error() + "\n")
+		} else {
+			info.WriteString(string(statusOutput))
+		}
+
+		// Get zpool list for this specific pool
+		info.WriteString("\nUSAGE\n")
+		info.WriteString(strings.Repeat("-", 70) + "\n")
+		listCmd := exec.Command("zpool", "list", "-v", pool)
+		listOutput, err := listCmd.Output()
+		if err != nil {
+			info.WriteString("Error: " + err.Error() + "\n")
+		} else {
+			info.WriteString(string(listOutput))
+		}
+
+		// Get datasets for this pool
+		info.WriteString("\nDATASETS\n")
+		info.WriteString(strings.Repeat("-", 70) + "\n")
+		zfsCmd := exec.Command("zfs", "list", "-r", "-o", "name,used,avail,refer,mountpoint", pool)
+		zfsOutput, err := zfsCmd.Output()
+		if err != nil {
+			info.WriteString("Error: " + err.Error() + "\n")
+		} else {
+			info.WriteString(string(zfsOutput))
+		}
+
+		// Get snapshots for this pool
+		info.WriteString("\nSNAPSHOTS\n")
+		info.WriteString(strings.Repeat("-", 70) + "\n")
+		snapCmd := exec.Command("zfs", "list", "-r", "-t", "snapshot", "-o", "name,used,refer,creation", pool)
+		snapOutput, err := snapCmd.Output()
+		if err != nil {
+			info.WriteString("No snapshots or error: " + err.Error() + "\n")
+		} else {
+			output := strings.TrimSpace(string(snapOutput))
+			if output == "" {
+				info.WriteString("No snapshots found.\n")
+			} else {
+				info.WriteString(output + "\n")
+			}
+		}
+
+		return zpoolInfoLoadedMsg{content: info.String()}
+	}
+}
+
+// renderZpoolInfoContent renders detailed zpool information in a scrollable viewport
+func (m model) renderZpoolInfoContent(width int) string {
+	if !m.zpoolInfoReady {
+		// Show loading spinner
+		return lipgloss.NewStyle().
+			Width(width).
+			Align(lipgloss.Center).
+			Render(m.spinner.View() + " Loading pool information...")
+	}
+
+	var b strings.Builder
+
+	// Title
+	title := selectedItemStyle.Render(fmt.Sprintf("Pool Information: %s", m.zpoolInfoPool))
+	b.WriteString(lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(title))
+	b.WriteString("\n\n")
+
+	// Viewport with content
+	b.WriteString(m.zpoolViewport.View())
+	b.WriteString("\n")
+
+	// Footer with scroll info
+	scrollInfo := subtitleStyle.Render(fmt.Sprintf(
+		"Scroll: j/k or arrows | %d%% | esc/q to return",
+		int(m.zpoolViewport.ScrollPercent()*100)))
+	b.WriteString(lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(scrollInfo))
+
+	return b.String()
+}
+
+// preparePoolAccess imports pool if needed and checks if unlock is required
+func (m model) preparePoolAccess(pool string) tea.Cmd {
+	return func() tea.Msg {
+		// Check if pool is imported
+		imported, err := isPoolImported(pool)
+		if err != nil {
+			return poolReadyMsg{pool: pool, err: fmt.Errorf("failed to check pool status: %w", err)}
+		}
+
+		if !imported {
+			// Try to import the pool
+			cmd := exec.Command("sudo", "zpool", "import", pool)
+			if err := cmd.Run(); err != nil {
+				// Try without sudo
+				cmd = exec.Command("zpool", "import", pool)
+				if err := cmd.Run(); err != nil {
+					return poolReadyMsg{pool: pool, err: fmt.Errorf("failed to import pool: %w", err)}
+				}
+			}
+		}
+
+		return poolReadyMsg{pool: pool}
+	}
+}
+
+// unlockAndLoadMaintenance unlocks the pool and loads maintenance status
+func (m model) unlockAndLoadMaintenance() tea.Cmd {
+	pool := m.maintenancePool
+	password := m.password
+	return func() tea.Msg {
+		// Try to unlock the pool
+		cmd := exec.Command("zfs", "load-key", pool)
+		cmd.Stdin = strings.NewReader(password + "\n")
+		if err := cmd.Run(); err != nil {
+			return maintenanceStatusMsg{err: fmt.Errorf("failed to unlock pool: %w", err)}
+		}
+
+		// Now load the status
+		return loadMaintenanceStatusSync(pool)
+	}
+}
+
+// loadMaintenanceStatus returns a command that fetches maintenance status
+func (m model) loadMaintenanceStatus() tea.Cmd {
+	pool := m.maintenancePool
+	return func() tea.Msg {
+		return loadMaintenanceStatusSync(pool)
+	}
+}
+
+// loadMaintenanceStatusSync synchronously loads maintenance status
+func loadMaintenanceStatusSync(pool string) maintenanceStatusMsg {
+	var info strings.Builder
+
+	info.WriteString(fmt.Sprintf("Pool: %s\n", pool))
+	info.WriteString(strings.Repeat("=", 70) + "\n\n")
+
+	// Get pool status which includes scrub/resilver info
+	info.WriteString("POOL STATUS\n")
+	info.WriteString(strings.Repeat("-", 70) + "\n")
+	statusCmd := exec.Command("zpool", "status", pool)
+	statusOutput, err := statusCmd.Output()
+	if err != nil {
+		info.WriteString("Error: " + err.Error() + "\n")
+	} else {
+		info.WriteString(string(statusOutput))
+	}
+
+	// Get pool health
+	info.WriteString("\nPOOL HEALTH\n")
+	info.WriteString(strings.Repeat("-", 70) + "\n")
+	healthCmd := exec.Command("zpool", "list", "-H", "-o", "name,health,size,alloc,free,frag,cap", pool)
+	healthOutput, err := healthCmd.Output()
+	if err != nil {
+		info.WriteString("Error: " + err.Error() + "\n")
+	} else {
+		// Format the health info nicely
+		fields := strings.Fields(strings.TrimSpace(string(healthOutput)))
+		if len(fields) >= 7 {
+			info.WriteString(fmt.Sprintf("  Health:        %s\n", fields[1]))
+			info.WriteString(fmt.Sprintf("  Size:          %s\n", fields[2]))
+			info.WriteString(fmt.Sprintf("  Allocated:     %s\n", fields[3]))
+			info.WriteString(fmt.Sprintf("  Free:          %s\n", fields[4]))
+			info.WriteString(fmt.Sprintf("  Fragmentation: %s\n", fields[5]))
+			info.WriteString(fmt.Sprintf("  Capacity:      %s\n", fields[6]))
+		} else {
+			info.WriteString(string(healthOutput))
+		}
+	}
+
+	// Check for ongoing scrub/resilver
+	isScubbing := false
+	var progress float64
+	statusStr := string(statusOutput)
+	if strings.Contains(statusStr, "scrub in progress") || strings.Contains(statusStr, "resilver in progress") {
+		isScubbing = true
+		// Try to extract progress percentage
+		lines := strings.Split(statusStr, "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "% done") {
+				// Extract percentage
+				parts := strings.Fields(line)
+				for i, p := range parts {
+					if strings.HasSuffix(p, "%") {
+						fmt.Sscanf(parts[i], "%f%%", &progress)
+						break
+					}
+				}
+			}
+		}
+	}
+
+	info.WriteString("\n\nACTIONS\n")
+	info.WriteString(strings.Repeat("-", 70) + "\n")
+	if isScubbing {
+		info.WriteString("  [x] Stop Scrub - Cancel the current scrub operation\n")
+		info.WriteString("  [r] Refresh    - Update the status display\n")
+	} else {
+		info.WriteString("  [s] Start Scrub - Begin data integrity verification\n")
+		info.WriteString("  [r] Refresh     - Update the status display\n")
+	}
+	info.WriteString("  [q] Return      - Go back to main menu\n")
+
+	return maintenanceStatusMsg{
+		content:    info.String(),
+		isScubbing: isScubbing,
+		progress:   progress,
+	}
+}
+
+// startScrub starts a scrub operation on the maintenance pool
+func (m model) startScrub() tea.Cmd {
+	pool := m.maintenancePool
+	return func() tea.Msg {
+		cmd := exec.Command("sudo", "zpool", "scrub", pool)
+		if err := cmd.Run(); err != nil {
+			// Try without sudo
+			cmd = exec.Command("zpool", "scrub", pool)
+			if err := cmd.Run(); err != nil {
+				return scrubActionMsg{action: "start", err: fmt.Errorf("failed to start scrub: %w", err)}
+			}
+		}
+		return scrubActionMsg{action: "start", success: true, message: "Scrub started"}
+	}
+}
+
+// stopScrub stops a scrub operation on the maintenance pool
+func (m model) stopScrub() tea.Cmd {
+	pool := m.maintenancePool
+	return func() tea.Msg {
+		cmd := exec.Command("sudo", "zpool", "scrub", "-s", pool)
+		if err := cmd.Run(); err != nil {
+			// Try without sudo
+			cmd = exec.Command("zpool", "scrub", "-s", pool)
+			if err := cmd.Run(); err != nil {
+				return scrubActionMsg{action: "stop", err: fmt.Errorf("failed to stop scrub: %w", err)}
+			}
+		}
+		return scrubActionMsg{action: "stop", success: true, message: "Scrub stopped"}
+	}
+}
+
+// renderMaintenanceContent renders the pool maintenance view
+func (m model) renderMaintenanceContent(width int) string {
+	if !m.maintenanceReady {
+		// Show loading spinner
+		return lipgloss.NewStyle().
+			Width(width).
+			Align(lipgloss.Center).
+			Render(m.spinner.View() + " Loading maintenance status...")
+	}
+
+	var b strings.Builder
+
+	// Title
+	title := selectedItemStyle.Render(fmt.Sprintf("Pool Maintenance: %s", m.maintenancePool))
+	b.WriteString(lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(title))
+	b.WriteString("\n\n")
+
+	// Viewport with content
+	b.WriteString(m.zpoolViewport.View())
+	b.WriteString("\n")
+
+	// Footer with scroll info and hotkeys
+	scrollInfo := subtitleStyle.Render(fmt.Sprintf(
+		"Scroll: j/k | %d%% | s=scrub x=stop r=refresh q=return",
+		int(m.zpoolViewport.ScrollPercent()*100)))
+	b.WriteString(lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(scrollInfo))
+
+	return b.String()
 }
 
 // openURL opens a URL in the default browser
@@ -1492,6 +2107,30 @@ type progressMsg struct {
 	progress    float64
 	totalStages int
 	eta         time.Duration
+}
+
+type zpoolInfoLoadedMsg struct {
+	content string
+	err     error
+}
+
+type poolReadyMsg struct {
+	pool string
+	err  error
+}
+
+type maintenanceStatusMsg struct {
+	content    string
+	isScubbing bool
+	progress   float64
+	err        error
+}
+
+type scrubActionMsg struct {
+	action  string // "start" or "stop"
+	success bool
+	message string
+	err     error
 }
 
 type tickMsg time.Time
@@ -1582,7 +2221,7 @@ func checkPermissions() error {
 	if !isSudo() {
 		var b strings.Builder
 		b.WriteString("\n╔═══════════════════════════════════════════════════════╗\n")
-		b.WriteString("║                  ⚠️  NOTICE  ⚠️                         ║\n")
+		b.WriteString("║                     NOTICE                            ║\n")
 		b.WriteString("╚═══════════════════════════════════════════════════════╝\n\n")
 		b.WriteString("For the best experience, please run this application with sudo:\n\n")
 		b.WriteString("    sudo zfs-backup\n\n")
@@ -1604,7 +2243,7 @@ func checkPermissions() error {
 func main() {
 	// Check permissions first
 	if err := checkPermissions(); err != nil {
-		fmt.Fprintln(os.Stderr, errorStyle.Render("⚠️  "+err.Error()))
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
 	}
 
@@ -1633,18 +2272,18 @@ func handleCLI() {
 	arg := os.Args[1]
 	switch arg {
 	case "--backup", "-b":
-		fmt.Println(statusStyle.Render("📦 Running incremental backup..."))
+		fmt.Println(statusStyle.Render("Running incremental backup..."))
 		runBackupSync()
 	case "--force-backup", "-f":
-		fmt.Println(warningStyle.Render("🔥 Running force backup..."))
+		fmt.Println(warningStyle.Render("Running force backup..."))
 		runForceBackupSync()
 	case "--unmount", "-u":
-		fmt.Println(infoStyle.Render("🔌 Unmounting backup disk..."))
+		fmt.Println(infoStyle.Render("Unmounting backup disk..."))
 		runUnmountSync()
 	case "--help", "-h":
 		showCLIHelp()
 	default:
-		fmt.Fprintf(os.Stderr, errorStyle.Render("❌ Unknown option: %s\n"), arg)
+		fmt.Fprintf(os.Stderr, errorStyle.Render("Unknown option: %s\n"), arg)
 		fmt.Fprintln(os.Stderr, "Run 'zfs-backup --help' for usage information")
 		os.Exit(1)
 	}
@@ -1682,6 +2321,6 @@ Note: If you have ZFS delegation configured for your user, you can omit sudo.`
 	// Footer
 	fmt.Println()
 	fmt.Println(interstitialStyle.Render(strings.Repeat("─", 50)))
-	fmt.Println(footerCreditStyle.Render("Made with 💗 by Kartoza │ Donate! │ GitHub"))
+	fmt.Println(footerCreditStyle.Render("Made with <3 by Kartoza | Donate! | GitHub"))
 	fmt.Println()
 }

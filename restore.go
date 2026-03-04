@@ -1587,7 +1587,7 @@ func (m RestoreModel) renderPasswordEntry() string {
 
 	poolName := m.sourcePool
 
-	b.WriteString(selectedItemStyle.Render("🔐 Encryption Password") + "\n\n")
+	b.WriteString(selectedItemStyle.Render("Encryption Password") + "\n\n")
 	b.WriteString(infoStyle.Render(fmt.Sprintf("Enter password for %s:", poolName)) + "\n\n")
 	b.WriteString(m.passwordInput.View() + "\n")
 
@@ -1633,7 +1633,7 @@ func (m RestoreModel) renderExplorer() string {
 func (m RestoreModel) renderMkdirDialog() string {
 	var b strings.Builder
 
-	b.WriteString(selectedItemStyle.Render("📁 Create New Folder") + "\n\n")
+	b.WriteString(selectedItemStyle.Render("Create New Folder") + "\n\n")
 	b.WriteString(infoStyle.Render(fmt.Sprintf("In: %s", m.rightPath)) + "\n\n")
 	b.WriteString(m.mkdirInput.View() + "\n\n")
 	b.WriteString(subtleStyle.Render("Enter to create • Esc to cancel"))
@@ -1644,7 +1644,7 @@ func (m RestoreModel) renderMkdirDialog() string {
 func (m RestoreModel) renderRestoreModeDialog() string {
 	var b strings.Builder
 
-	b.WriteString(selectedItemStyle.Render("📥 Restore Mode") + "\n\n")
+	b.WriteString(selectedItemStyle.Render("Restore Mode") + "\n\n")
 	b.WriteString(infoStyle.Render(fmt.Sprintf("Restoring %d file(s)", len(m.selectedFiles))) + "\n\n")
 
 	// Option 1: Original location
@@ -1697,9 +1697,9 @@ func (m RestoreModel) renderLeftPanel(width, height int) string {
 	// Header
 	var headerText string
 	if m.currentSnapshot == "" {
-		headerText = fmt.Sprintf(" 📸 Snapshots (%s) ", m.sourcePool)
+		headerText = fmt.Sprintf(" Snapshots (%s) ", m.sourcePool)
 	} else {
-		headerText = fmt.Sprintf(" 📁 %s ", m.leftPath)
+		headerText = fmt.Sprintf(" %s ", m.leftPath)
 	}
 	header := panelHeaderStyle.Width(width - 2).Render(headerText)
 	content.WriteString(header + "\n")
@@ -1754,7 +1754,7 @@ func (m RestoreModel) renderRightPanel(width, height int) string {
 	var content strings.Builder
 
 	// Header
-	headerText := fmt.Sprintf(" 📁 %s ", m.rightPath)
+	headerText := fmt.Sprintf(" %s ", m.rightPath)
 	header := panelHeaderStyle.Width(width - 2).Render(headerText)
 	content.WriteString(header + "\n")
 
@@ -1772,14 +1772,14 @@ func (m RestoreModel) renderRightPanel(width, height int) string {
 }
 
 func (m RestoreModel) renderFileEntry(entry FileEntry, isCursor bool, width int) string {
-	// Icon
+	// Icon - using simple ASCII characters
 	var icon string
 	if entry.Name == ".." {
-		icon = "⬆️"
+		icon = "^"
 	} else if entry.IsDir {
-		icon = "📁"
+		icon = "/"
 	} else {
-		icon = "📄"
+		icon = " "
 	}
 
 	// Selection marker (don't allow selecting ..)
@@ -1874,7 +1874,7 @@ func (m RestoreModel) renderStatusBar() string {
 func (m RestoreModel) renderCopying() string {
 	var b strings.Builder
 
-	b.WriteString(selectedItemStyle.Render("📦 Copying Files...") + "\n\n")
+	b.WriteString(selectedItemStyle.Render("Copying Files...") + "\n\n")
 
 	if m.copyingFile != "" {
 		b.WriteString(infoStyle.Render(m.copyingFile) + "\n\n")
@@ -1899,7 +1899,7 @@ func (m RestoreModel) renderCopying() string {
 func (m RestoreModel) renderConfirmOverwrite() string {
 	var b strings.Builder
 
-	b.WriteString(warningStyle.Render("⚠️  Files Already Exist") + "\n\n")
+	b.WriteString(warningStyle.Render("Files Already Exist") + "\n\n")
 	b.WriteString(infoStyle.Render("The following files will be overwritten:") + "\n\n")
 
 	for i, f := range m.confirmFiles {
@@ -1923,7 +1923,7 @@ func (m RestoreModel) renderConfirmOverwrite() string {
 func (m RestoreModel) renderComplete() string {
 	var b strings.Builder
 
-	b.WriteString(statusStyle.Render("✅ Restore Complete") + "\n\n")
+	b.WriteString(statusStyle.Render("Restore Complete") + "\n\n")
 	b.WriteString(infoStyle.Render(fmt.Sprintf("Restored %d files to %s", len(m.selectedFiles), m.rightPath)) + "\n\n")
 
 	b.WriteString(infoStyle.Render("Press 'u' to safely unmount the source drive") + "\n")

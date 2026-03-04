@@ -62,7 +62,7 @@ func runBackupSync() {
 	ctx := context.Background()
 	msg, err := performBackup(ctx, password, "NIXROOT", "NIXBACKUPS", nil, nil)
 	if err != nil {
-		fmt.Println(errorStyle.Render("❌ " + err.Error()))
+		fmt.Println(errorStyle.Render("Error:" + err.Error()))
 		return
 	}
 	fmt.Println(statusStyle.Render(msg))
@@ -77,7 +77,7 @@ func runForceBackupSync() {
 	ctx := context.Background()
 	msg, err := performForceBackup(ctx, password, "NIXROOT", "NIXBACKUPS", nil, nil)
 	if err != nil {
-		fmt.Println(errorStyle.Render("❌ " + err.Error()))
+		fmt.Println(errorStyle.Render("Error:" + err.Error()))
 		return
 	}
 	fmt.Println(statusStyle.Render(msg))
@@ -86,7 +86,7 @@ func runForceBackupSync() {
 func runUnmountSync() {
 	msg, err := performUnmount("NIXBACKUPS")
 	if err != nil {
-		fmt.Println(errorStyle.Render("❌ " + err.Error()))
+		fmt.Println(errorStyle.Render("Error:" + err.Error()))
 		return
 	}
 	fmt.Println(statusStyle.Render(msg))
@@ -109,7 +109,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 	var state *BackupState
 	if resumeFrom != nil {
 		state = resumeFrom
-		output.WriteString("📥 Resuming backup from previous session...\n\n")
+		output.WriteString("[RESUME]Resuming backup from previous session...\n\n")
 	} else {
 		state = NewBackupState("backup")
 	}
@@ -171,7 +171,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 	}
 
 	// Stage 1: Import pool
-	err := executeStage(StageImportPool, fmt.Sprintf("🔌 Importing %s pool", destPool), func() error {
+	err := executeStage(StageImportPool, fmt.Sprintf("[POOL]Importing %s pool", destPool), func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 IMPORT POOL\n")
 		output.WriteString("   ZFS pools on external drives must be 'imported' before use.\n")
@@ -190,7 +190,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 				return fmt.Errorf("failed to import pool: %w", err)
 			}
 		} else {
-			output.WriteString(fmt.Sprintf("✅ %s is already imported\n", destPool))
+			output.WriteString(fmt.Sprintf("[OK]%s is already imported\n", destPool))
 		}
 		return nil
 	})
@@ -218,7 +218,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 				return fmt.Errorf("failed to load encryption key: %w", err)
 			}
 		} else {
-			output.WriteString("✅ Encryption key is already loaded\n")
+			output.WriteString("[OK]Encryption key is already loaded\n")
 		}
 		return nil
 	})
@@ -227,7 +227,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 	}
 
 	// Stage 3: Create snapshot
-	err = executeStage(StageCreateSnapshot, "📸 Creating snapshot", func() error {
+	err = executeStage(StageCreateSnapshot, "[SNAP]Creating snapshot", func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 CREATE SNAPSHOT\n")
 		output.WriteString("   A ZFS snapshot captures the exact state of your data at this\n")
@@ -290,7 +290,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 
 		output.WriteString("Creating bookmarks and pruning old snapshots...\n")
 		if err := pruneOldLocalSnapshots(sourcePool); err != nil {
-			output.WriteString(fmt.Sprintf("⚠️  Warning: %v\n", err))
+			output.WriteString(fmt.Sprintf("Warning:Warning: %v\n", err))
 		}
 		return nil
 	})
@@ -310,7 +310,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 
 		output.WriteString("Keeping monthly archives...\n")
 		if err := pruneBackupSnapshots(destPool); err != nil {
-			output.WriteString(fmt.Sprintf("⚠️  Warning: %v\n", err))
+			output.WriteString(fmt.Sprintf("Warning:Warning: %v\n", err))
 		}
 		return nil
 	})
@@ -319,7 +319,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 	}
 
 	// Stage 7: Export and power off
-	err = executeStage(StageExportPool, "🔌 Exporting pool and powering off", func() error {
+	err = executeStage(StageExportPool, "[POOL]Exporting pool and powering off", func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 EXPORT & POWER OFF\n")
 		output.WriteString("   Exporting the pool ensures all data is flushed to disk and\n")
@@ -331,7 +331,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 		// Generate report
 		report, err := generateBackupReport(sourcePool, destPool)
 		if err != nil {
-			output.WriteString(fmt.Sprintf("⚠️  Warning: failed to generate report: %v\n", err))
+			output.WriteString(fmt.Sprintf("Warning:Warning: failed to generate report: %v\n", err))
 		} else {
 			output.WriteString("\n" + report + "\n")
 		}
@@ -345,10 +345,10 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 
 			output.WriteString(fmt.Sprintf("⚡️ Powering off USB drive (%s)\n", device))
 			if err := runCommandWithContext(ctx, "udisksctl", "power-off", "-b", device); err != nil {
-				output.WriteString(fmt.Sprintf("⚠️  Warning: failed to power off device: %v\n", err))
+				output.WriteString(fmt.Sprintf("Warning:Warning: failed to power off device: %v\n", err))
 			}
 		} else {
-			output.WriteString("⚠️  Skipping device power-off\n")
+			output.WriteString("Warning:Skipping device power-off\n")
 			if err := runCommandWithContext(ctx, "zpool", "export", destPool); err != nil {
 				return fmt.Errorf("failed to export pool: %w", err)
 			}
@@ -359,7 +359,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 		return output.String(), err
 	}
 
-	output.WriteString("\n✅ Backup completed successfully!")
+	output.WriteString("\n[OK]Backup completed successfully!")
 	return output.String(), nil
 }
 
@@ -380,7 +380,7 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 	var state *BackupState
 	if resumeFrom != nil {
 		state = resumeFrom
-		output.WriteString("📥 Resuming force backup from previous session...\n\n")
+		output.WriteString("[RESUME]Resuming force backup from previous session...\n\n")
 	} else {
 		state = NewBackupState("force-backup")
 	}
@@ -442,11 +442,11 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 	}
 
 	// Stage 1: Import pool
-	err := executeStage(StageImportPool, fmt.Sprintf("🔌 Importing %s pool", destPool), func() error {
+	err := executeStage(StageImportPool, fmt.Sprintf("[POOL]Importing %s pool", destPool), func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 IMPORT POOL (Force Backup)\n")
 		output.WriteString("   Importing the external backup pool to make it available.\n")
-		output.WriteString("   ⚠️  Force backup will DELETE existing snapshots on the target!\n")
+		output.WriteString("   Warning:Force backup will DELETE existing snapshots on the target!\n")
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 		output.WriteString(fmt.Sprintf("Mounting %s volume from USB drive\n", destPool))
@@ -477,7 +477,7 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 	}
 
 	// Stage 3: Create snapshot
-	err = executeStage(StageCreateSnapshot, "📸 Creating snapshot", func() error {
+	err = executeStage(StageCreateSnapshot, "[SNAP]Creating snapshot", func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 CREATE SNAPSHOT\n")
 		output.WriteString("   Creating a new snapshot of your local data before syncing.\n")
@@ -502,7 +502,7 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 	err = executeStage(StageSyncData, "📨 Force syncing to backup disk", func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 FORCE SYNC (DESTRUCTIVE)\n")
-		output.WriteString("   ⚠️  Using --force-delete to remove old snapshots on backup.\n")
+		output.WriteString("   Warning:Using --force-delete to remove old snapshots on backup.\n")
 		output.WriteString("   This resets the backup to match your current source state.\n")
 		output.WriteString("   Use this when the incremental chain is broken or corrupted.\n")
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
@@ -535,7 +535,7 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 		output.WriteString("Listing the snapshots on backup disk\n")
 		snapshots, err := listSnapshots()
 		if err != nil {
-			output.WriteString(fmt.Sprintf("⚠️  Warning: failed to list snapshots: %v\n", err))
+			output.WriteString(fmt.Sprintf("Warning:Warning: failed to list snapshots: %v\n", err))
 		} else {
 			output.WriteString(snapshots + "\n")
 		}
@@ -545,7 +545,7 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 		return output.String(), err
 	}
 
-	output.WriteString("\n✅ Force backup completed successfully!")
+	output.WriteString("\n[OK]Force backup completed successfully!")
 	return output.String(), nil
 }
 
@@ -556,8 +556,8 @@ func performPrepare(device, poolName string) (string, error) {
 		return "", fmt.Errorf("pool name not specified")
 	}
 
-	output.WriteString(fmt.Sprintf("🔧 Preparing backup device: %s\n", device))
-	output.WriteString(fmt.Sprintf("⚠️  Creating encrypted ZFS pool %s\n", poolName))
+	output.WriteString(fmt.Sprintf("[SETUP]Preparing backup device: %s\n", device))
+	output.WriteString(fmt.Sprintf("Warning:Creating encrypted ZFS pool %s\n", poolName))
 
 	// Note: This will prompt for passphrase interactively
 	if err := runCommand("zpool", "create",
@@ -571,7 +571,7 @@ func performPrepare(device, poolName string) (string, error) {
 		return "", fmt.Errorf("failed to create pool: %w", err)
 	}
 
-	output.WriteString(fmt.Sprintf("✅ Backup device %s prepared as encrypted ZFS pool %s\n", device, poolName))
+	output.WriteString(fmt.Sprintf("[OK]Backup device %s prepared as encrypted ZFS pool %s\n", device, poolName))
 	return output.String(), nil
 }
 
@@ -582,7 +582,7 @@ func performUnmount(poolName string) (string, error) {
 		return "", fmt.Errorf("pool name not specified")
 	}
 
-	output.WriteString(fmt.Sprintf("🔌 Unmounting the %s zpool\n\n", poolName))
+	output.WriteString(fmt.Sprintf("[POOL]Unmounting the %s zpool\n\n", poolName))
 	output.WriteString("📊 BEFORE STATE:\n")
 	output.WriteString("================\n")
 
@@ -606,10 +606,10 @@ func performUnmount(poolName string) (string, error) {
 
 		output.WriteString(fmt.Sprintf("⚡️ Powering off the USB drive (%s)\n", device))
 		if err := runCommand("udisksctl", "power-off", "-b", device); err != nil {
-			output.WriteString(fmt.Sprintf("⚠️  Warning: failed to power off device: %v\n", err))
+			output.WriteString(fmt.Sprintf("Warning:Warning: failed to power off device: %v\n", err))
 		}
 	} else {
-		output.WriteString("⚠️  Skipping device power-off due to device detection failure\n")
+		output.WriteString("Warning:Skipping device power-off due to device detection failure\n")
 		// Try to export anyway
 		_ = runCommand("zpool", "export", poolName)
 	}
@@ -627,7 +627,7 @@ func performUnmount(poolName string) (string, error) {
 		output.WriteString("ZFS Filesystems:\n" + filesystems + "\n\n")
 	}
 
-	output.WriteString("✅ Safe to unplug the external drive")
+	output.WriteString("[OK]Safe to unplug the external drive")
 	return output.String(), nil
 }
 
@@ -777,7 +777,7 @@ func waitForZFSReceive(ctx context.Context, dataset string, output *strings.Buil
 				return err
 			}
 			if !running {
-				output.WriteString("   ✅ Previous receive process completed\n")
+				output.WriteString("   [OK]Previous receive process completed\n")
 				return nil
 			}
 			output.WriteString("   Still waiting...\n")
