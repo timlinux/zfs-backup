@@ -1,0 +1,38 @@
+name: zfs-backup
+base: core22
+version: '1.2.0'
+summary: Beautiful TUI for managing ZFS backups
+description: |
+  A beautiful Terminal User Interface (TUI) for managing ZFS backups to external
+  drives. Features include:
+
+  - Incremental backups using syncoid
+  - File restoration from snapshots with dual-panel browser
+  - Pool information viewer with detailed status
+  - Pool maintenance with scrub start/stop/monitor
+  - Safe device unmounting with power-off
+  - Encrypted pool support
+
+  Made with <3 by Kartoza (https://kartoza.com)
+
+grade: stable
+confinement: classic  # Needs access to ZFS commands and block devices
+
+architectures:
+  - build-on: amd64
+  - build-on: arm64
+
+apps:
+  zfs-backup:
+    command: bin/zfs-backup
+
+parts:
+  zfs-backup:
+    plugin: go
+    source: .
+    build-snaps:
+      - go/1.22/stable
+    build-environment:
+      - CGO_ENABLED: "0"
+    override-build: |
+      go build -ldflags="-s -w" -o $SNAPCRAFT_PART_INSTALL/bin/zfs-backup .

@@ -1,0 +1,26 @@
+Source: zfs-backup
+Section: admin
+Priority: optional
+Maintainer: Kartoza <info@kartoza.com>
+Build-Depends: debhelper-compat (= 13), golang-go (>= 1.22)
+Standards-Version: 4.6.0
+Homepage: https://github.com/timlinux/zfs-backup
+Vcs-Browser: https://github.com/timlinux/zfs-backup
+Vcs-Git: https://github.com/timlinux/zfs-backup.git
+
+Package: zfs-backup
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, zfsutils-linux, sanoid
+Recommends: udisks2
+Description: Beautiful TUI for managing ZFS backups
+ A beautiful Terminal User Interface (TUI) for managing ZFS backups to external
+ drives. Features include:
+ .
+  - Incremental backups using syncoid
+  - File restoration from snapshots with dual-panel browser
+  - Pool information viewer with detailed status
+  - Pool maintenance with scrub start/stop/monitor
+  - Safe device unmounting with power-off
+  - Encrypted pool support
+ .
+ Made with <3 by Kartoza.

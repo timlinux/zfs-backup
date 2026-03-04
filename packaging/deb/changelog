@@ -1,0 +1,22 @@
+zfs-backup (1.2.0-1) unstable; urgency=medium
+
+  * Add pool info viewer with scrollable display
+  * Add pool maintenance with scrub control
+  * Fix pool import/unlock flow for encrypted pools
+  * Make result reports scrollable
+  * Remove emojis for cleaner UI
+
+ -- Kartoza <info@kartoza.com>  Tue, 04 Mar 2026 10:00:00 +0200
+
+zfs-backup (1.1.0-1) unstable; urgency=medium
+
+  * Add Show zpool info feature
+  * Simplified UI by removing emojis
+
+ -- Kartoza <info@kartoza.com>  Mon, 03 Mar 2026 10:00:00 +0200
+
+zfs-backup (1.0.0-1) unstable; urgency=medium
+
+  * Initial release
+
+ -- Kartoza <info@kartoza.com>  Sun, 02 Mar 2026 10:00:00 +0200

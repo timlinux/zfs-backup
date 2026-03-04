@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+export CGO_ENABLED = 0
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	go build -ldflags="-s -w" -o zfs-backup .
+
+override_dh_auto_install:
+	install -Dm755 zfs-backup debian/zfs-backup/usr/bin/zfs-backup
+
+override_dh_auto_test:
+	# Skip tests during package build
