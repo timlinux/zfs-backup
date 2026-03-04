@@ -53,6 +53,28 @@ The tool supports vim-style navigation:
 | ++j++ | ++arrow-down++ |
 | ++k++ | ++arrow-up++ |
 
+## Pool Info / Maintenance Shortcuts
+
+In the scrollable information views:
+
+| Key | Action |
+|-----|--------|
+| ++j++ / ++arrow-down++ | Scroll down |
+| ++k++ / ++arrow-up++ | Scroll up |
+| ++ctrl+d++ | Page down |
+| ++ctrl+u++ | Page up |
+| ++g++ | Go to top |
+| ++shift+g++ | Go to bottom |
+| ++escape++ / ++q++ | Return to menu |
+
+### Maintenance-Specific
+
+| Key | Action |
+|-----|--------|
+| ++s++ | Start scrub |
+| ++x++ | Stop scrub |
+| ++r++ | Refresh status |
+
 ## Restore Mode Shortcuts
 
 In the dual-panel restore explorer, additional shortcuts are available:

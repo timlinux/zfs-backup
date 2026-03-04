@@ -1,258 +1,108 @@
-# 🗄️ Kartoza ZFS Backup Tool
+# Kartoza ZFS Backup Tool
 
 A beautiful TUI (Terminal User Interface) for managing ZFS backups, built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lipgloss](https://github.com/charmbracelet/lipgloss).
 
-![Kartoza ZFS Backup Screenshot](kartoza-zfs-backup.png)
+[![Release](https://img.shields.io/github/v/release/timlinux/zfs-backup)](https://github.com/timlinux/zfs-backup/releases)
+[![License](https://img.shields.io/github/license/timlinux/zfs-backup)](LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-online-blue)](https://timlinux.github.io/zfs-backup/)
+
+📖 **[Full Documentation](https://timlinux.github.io/zfs-backup/)**
 
 ## Features
 
-- 📦 **Incremental Backups** - Efficient snapshots with syncoid integration
-- 🔥 **Force Backup** - Destructive backup option for out-of-sync scenarios
-- 📥 **Restore Files** - Dual-panel file explorer to browse snapshots and restore files
-- 🔧 **Device Preparation** - Create encrypted ZFS pools with AES-256-GCM
-- 🔌 **Safe Unmounting** - Properly export pools and power off USB drives
-- 🎨 **Beautiful TUI** - Intuitive interface with progress indicators and styled output
-- ⌨️  **CLI Mode** - Command-line arguments for automation and scripting
+- **Incremental Backups** - Efficient snapshots with syncoid integration
+- **Force Backup** - Destructive backup option for out-of-sync scenarios
+- **Restore Files** - Dual-panel file explorer to browse snapshots and restore files
+- **Pool Information** - View detailed pool structure, health, datasets, and snapshots
+- **Pool Maintenance** - Start, stop, and monitor scrub operations
+- **Device Preparation** - Create encrypted ZFS pools with AES-256-GCM
+- **Safe Unmounting** - Properly export pools and power off USB drives
+- **CLI Mode** - Command-line arguments for automation and scripting
 
-## Requirements
+## Quick Start
 
-- ZFS filesystem with at least one pool (source)
-- [syncoid](https://github.com/jimsalterjrs/sanoid) (from sanoid package)
-- Root privileges (via sudo) OR ZFS delegation configured for your user
-- External drive with an encrypted ZFS pool (destination)
-
-## Installation
-
-### Method 1: NixOS Module (Recommended)
-
-Add to your `flake.nix`:
-
-```nix
-{
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    zfs-backup.url = "github:timlinux/zfs-backup";
-  };
-
-  outputs = { self, nixpkgs, zfs-backup, ... }: {
-    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
-      system = "x86_64-linux";
-      modules = [
-        # Import the module
-        zfs-backup.nixosModules.default
-        # Add the overlay so pkgs.zfs-backup is available
-        { nixpkgs.overlays = [ zfs-backup.overlays.default ]; }
-
-        ./configuration.nix
-      ];
-    };
-  };
-}
-```
-
-Then in your `configuration.nix`:
-
-```nix
-{ config, pkgs, ... }:
-{
-  # Enable the service (adds package to systemPackages)
-  services.zfs-backup.enable = true;
-}
-```
-
-### Method 2: Direct Package Installation
-
-If you don't need the module features, just add the overlay:
-
-```nix
-{
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    zfs-backup.url = "github:timlinux/zfs-backup";
-  };
-
-  outputs = { self, nixpkgs, zfs-backup, ... }: {
-    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
-      system = "x86_64-linux";
-      modules = [
-        { nixpkgs.overlays = [ zfs-backup.overlays.default ]; }
-        ./configuration.nix
-      ];
-    };
-  };
-}
-```
-
-Then in `configuration.nix`:
-
-```nix
-{ config, pkgs, ... }:
-{
-  environment.systemPackages = [ pkgs.zfs-backup ];
-}
-```
-
-### Run Without Installing
+### Install
 
 ```bash
+# Download binary (Linux x86_64)
+curl -L https://github.com/timlinux/zfs-backup/releases/latest/download/zfs-backup-linux-amd64 -o zfs-backup
+chmod +x zfs-backup
+sudo mv zfs-backup /usr/local/bin/
+
+# Or with Nix
 nix run github:timlinux/zfs-backup
 ```
 
-### Building from Source
+See [Installation Guide](https://timlinux.github.io/zfs-backup/admin-guide/installation/) for more options including NixOS, Arch (AUR), Debian, Fedora, Snap, and Flatpak.
+
+### Run
 
 ```bash
-git clone https://github.com/timlinux/zfs-backup
-cd zfs-backup
-nix build
-./result/bin/zfs-backup
-```
-
-## Usage
-
-### Interactive Mode
-
-Simply run without arguments to launch the TUI:
-
-```bash
+# Interactive mode
 sudo zfs-backup
+
+# CLI mode
+sudo zfs-backup --backup      # Run incremental backup
+sudo zfs-backup --unmount     # Safely unmount backup drive
+sudo zfs-backup --help        # Show help
 ```
 
-Navigate using arrow keys, select options with Enter.
+## Requirements
 
-**Note:** If you have ZFS delegation configured for your user, you can run without sudo.
+- Linux with ZFS filesystem
+- [syncoid](https://github.com/jimsalterjrs/sanoid) (from sanoid package)
+- Root privileges or ZFS delegation configured
+- External drive with encrypted ZFS pool (for backups)
 
-### CLI Mode
+## Menu Options
 
-For automation and scripting:
-
-```bash
-# Run incremental backup
-sudo zfs-backup --backup
-
-# Force backup (destructive)
-sudo zfs-backup --force-backup
-
-# Unmount backup disk
-sudo zfs-backup --unmount
-
-# Show help
-zfs-backup --help
-```
-
-**Note:** If you have ZFS delegation configured, you can omit `sudo`.
-
-## Operations
-
-### 📦 Incremental Backup
-
-Performs an incremental backup using syncoid:
-
-1. Imports and unlocks the NIXBACKUPS pool
-2. Creates a timestamped snapshot of NIXROOT/home
-3. Syncs snapshots incrementally to NIXBACKUPS/home
-4. Prunes old local snapshots (keeps last 7)
-5. Prunes old backup snapshots (keeps last 3 months)
-6. Generates a backup health report
-7. Safely exports the pool and powers off the drive
-
-### 🔥 Force Backup
-
-Forces a complete backup by deleting previous snapshots on the backup disk. Use this when local and backup are out of sync.
-
-⚠️ **Warning**: This is a destructive operation!
-
-### 🔧 Prepare Backup Device
-
-Creates an encrypted ZFS pool on a new external drive:
-
-- Prompts for device path (e.g., `/dev/sda`)
-- Requires double confirmation
-- Creates NIXBACKUPS pool with:
-  - AES-256-GCM encryption
-  - Passphrase authentication
-  - ZSTD compression
-  - Optimized atime settings
-
-⚠️ **Warning**: This will erase all data on the device!
-
-### 📥 Restore Files
-
-Browse snapshots and restore files using a dual-panel file explorer:
-
-- Select source pool (containing snapshots) and destination
-- View all snapshots with timestamps and sizes
-- Navigate into snapshots to browse files
-- Select files with spacebar, copy with 'y' (yank)
-- Vim/yazi-style keybindings (hjkl, g/G, Ctrl+u/d)
-
-### 🔌 Unmount Backup Disk
-
-Safely exports the NIXBACKUPS pool and powers off the USB drive. Always use this before unplugging the backup drive to prevent data corruption.
-
-## Configuration
-
-The tool works with the following ZFS pool structure:
-
-- **NIXROOT/home** - Local ZFS filesystem to backup
-- **NIXBACKUPS/home** - External backup destination
-
-### Running Without Sudo (Optional)
-
-If you prefer not to use sudo, you can configure ZFS delegation to allow your user to perform the necessary operations:
-
-```bash
-# Allow your user to perform ZFS operations on NIXROOT and NIXBACKUPS
-sudo zfs allow -u $USER snapshot,send,receive,mount,create,destroy NIXROOT
-sudo zfs allow -u $USER snapshot,send,receive,mount,create,destroy,load-key NIXBACKUPS
-
-# Allow pool import/export operations
-sudo zpool set delegation=on NIXROOT
-sudo zpool set delegation=on NIXBACKUPS
-```
-
-**Note:** Pool operations (import/export) and some encryption operations may still require root privileges even with delegation configured. For most users, running with `sudo` is the simplest approach.
+| Option | Description |
+|--------|-------------|
+| Backup ZFS (incremental) | Run efficient incremental backup using syncoid |
+| Restore Files | Browse snapshots and restore individual files |
+| Show zpool info | View pool structure, health, datasets, and snapshots |
+| Pool Maintenance | Start/stop scrubs, monitor pool health |
+| Unmount Backup Disk | Safely export pool and power off USB drive |
+| Prepare Backup Device | Create new encrypted ZFS pool on external drive |
+| Force Backup (destructive) | Reset backup when incremental chain is broken |
 
 ## Keyboard Shortcuts
 
-### Main Menu
-
+### Navigation
 | Key | Action |
 |-----|--------|
-| ↑/k ↓/j | Navigate menu |
-| Enter | Select option |
-| y/n | Confirm/Cancel |
-| Esc | Go back |
-| q | Quit application |
-| Ctrl+C | Force quit |
+| `↑/k` `↓/j` | Navigate |
+| `Enter` | Select |
+| `Esc` | Go back |
+| `q` | Quit |
+
+### Scrollable Views (Pool Info, Maintenance, Results)
+| Key | Action |
+|-----|--------|
+| `j/k` | Scroll line |
+| `Ctrl+u/d` | Page up/down |
+| `g/G` | Top/bottom |
 
 ### Restore Mode
-
 | Key | Action |
 |-----|--------|
-| h/l or Tab | Switch panels |
-| j/k | Navigate up/down |
-| Enter | Enter directory/snapshot |
-| Space | Toggle file selection |
-| y | Yank (copy) selected files |
-| / | Search |
-| s | Cycle sort mode |
-| u | Unmount and power off |
-| q/Esc | Return to menu |
+| `Tab` or `h/l` | Switch panels |
+| `Space` | Toggle selection |
+| `y` | Copy selected files |
+| `/` | Search |
+| `m` | Create directory |
 
-## Development
+See [Full Keyboard Reference](https://timlinux.github.io/zfs-backup/user-guide/keyboard-shortcuts/).
 
-Enter the development shell:
+## Documentation
 
-```bash
-nix develop
-```
-
-Build and run:
-
-```bash
-go build
-./zfs-backup
-```
+- [Getting Started](https://timlinux.github.io/zfs-backup/user-guide/getting-started/)
+- [Backup Operations](https://timlinux.github.io/zfs-backup/user-guide/backup-operations/)
+- [Restore Files](https://timlinux.github.io/zfs-backup/user-guide/restore-files/)
+- [Pool Information](https://timlinux.github.io/zfs-backup/user-guide/pool-info/)
+- [Pool Maintenance](https://timlinux.github.io/zfs-backup/user-guide/pool-maintenance/)
+- [Installation Guide](https://timlinux.github.io/zfs-backup/admin-guide/installation/)
+- [ZFS Delegation](https://timlinux.github.io/zfs-backup/admin-guide/zfs-delegation/)
 
 ## Architecture
 
@@ -262,37 +112,20 @@ zfs-backup/
 ├── zfs.go        # ZFS operations (backup, prepare, unmount)
 ├── state.go      # Backup state management for resume
 ├── restore.go    # Restore mode with dual-panel explorer
-├── package.nix   # Nix package definition
 ├── flake.nix     # Nix flake configuration
-└── go.mod        # Go module dependencies
+└── docs/         # MkDocs documentation
 ```
-
-## Dependencies
-
-### Go Libraries
-
-- [Bubble Tea](https://github.com/charmbracelet/bubbletea) - TUI framework
-- [Bubbles](https://github.com/charmbracelet/bubbles) - TUI components
-- [Lipgloss](https://github.com/charmbracelet/lipgloss) - Style definitions
-
-### System Dependencies
-
-- ZFS utilities
-- syncoid (from sanoid)
-- udisks2
-
-## License
-
-MIT License - see LICENSE file for details
-
-## Author
-
-Tim Sutton ([@timlinux](https://github.com/timlinux))
 
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+See [Contributing Guide](https://timlinux.github.io/zfs-backup/developer-guide/contributing/).
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details.
+
 ---
 
-Made with 💗 by [Kartoza](https://kartoza.com) | [Donate!](https://github.com/sponsors/kartoza) | [GitHub](https://github.com/kartoza/zfs-backup)
+Made with <3 by [Kartoza](https://kartoza.com) | [Donate!](https://github.com/sponsors/kartoza) | [GitHub](https://github.com/timlinux/zfs-backup)

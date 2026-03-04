@@ -30,7 +30,19 @@ Kartoza ZFS Backup Tool provides an intuitive terminal interface for managing ZF
 
     Dual-panel file explorer for browsing snapshots and restoring files. Vim/yazi-style keybindings for efficient navigation.
 
--   :material-wrench: **Device Preparation**
+-   :material-information: **Pool Information**
+
+    ---
+
+    View comprehensive pool details including structure, health, datasets, and snapshots in a scrollable display.
+
+-   :material-wrench: **Pool Maintenance**
+
+    ---
+
+    Start, stop, and monitor scrub operations for data integrity verification with real-time progress.
+
+-   :material-shield-lock: **Device Preparation**
 
     ---
 
@@ -41,12 +53,6 @@ Kartoza ZFS Backup Tool provides an intuitive terminal interface for managing ZF
     ---
 
     Properly export pools and power off USB drives to prevent data corruption.
-
--   :material-palette: **Beautiful TUI**
-
-    ---
-
-    Intuitive interface with progress indicators, explanatory content, and Kartoza brand styling.
 
 -   :material-console: **CLI Mode**
 

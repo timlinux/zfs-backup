@@ -1,10 +1,10 @@
 site_name: Kartoza ZFS Backup Tool
 site_description: A beautiful TUI for managing ZFS backups
 site_author: Tim Sutton / Kartoza
-site_url: https://kartoza.github.io/zfs-backup/
+site_url: https://timlinux.github.io/zfs-backup/
 
-repo_name: kartoza/zfs-backup
-repo_url: https://github.com/kartoza/zfs-backup
+repo_name: timlinux/zfs-backup
+repo_url: https://github.com/timlinux/zfs-backup
 
 copyright: Copyright &copy; 2024 Kartoza
 
@@ -66,11 +66,15 @@ nav:
   - User Guide:
     - Getting Started: user-guide/getting-started.md
     - Backup Operations: user-guide/backup-operations.md
+    - Restore Files: user-guide/restore-files.md
+    - Pool Information: user-guide/pool-info.md
+    - Pool Maintenance: user-guide/pool-maintenance.md
     - Keyboard Shortcuts: user-guide/keyboard-shortcuts.md
   - Administrator Guide:
     - Installation: admin-guide/installation.md
     - Configuration: admin-guide/configuration.md
     - ZFS Delegation: admin-guide/zfs-delegation.md
+    - Packaging: admin-guide/packaging.md
   - Developer Guide:
     - Architecture: developer-guide/architecture.md
     - Building: developer-guide/building.md
@@ -79,7 +83,9 @@ nav:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/kartoza/zfs-backup
+      link: https://github.com/timlinux/zfs-backup
     - icon: fontawesome/solid/globe
       link: https://kartoza.com
+    - icon: fontawesome/solid/heart
+      link: https://github.com/sponsors/kartoza
   generator: false
