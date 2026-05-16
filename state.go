@@ -4,8 +4,140 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
+
+// =============================================================================
+// Remote Host Profiles
+// =============================================================================
+
+// RemoteHost represents a saved remote host connection profile
+type RemoteHost struct {
+	Name    string `json:"name"`    // Display name (e.g., "Office Server")
+	SSHHost string `json:"ssh_host"` // SSH connection string (user@host)
+	Dataset string `json:"dataset"`  // Remote dataset (e.g., NIXROOT/home)
+}
+
+// RemoteHostConfig holds all saved remote host profiles
+type RemoteHostConfig struct {
+	Hosts []RemoteHost `json:"hosts"`
+}
+
+// getConfigDir returns the config directory path, creating it if needed
+func getConfigDir() (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		configDir = filepath.Join(home, ".config")
+	}
+
+	appDir := filepath.Join(configDir, "zfs-backup")
+	if err := os.MkdirAll(appDir, 0755); err != nil {
+		return "", err
+	}
+
+	return appDir, nil
+}
+
+// getHostsFilePath returns the path to the hosts config file
+func getHostsFilePath() (string, error) {
+	dir, err := getConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "hosts.json"), nil
+}
+
+// LoadRemoteHosts loads saved remote host profiles from disk
+func LoadRemoteHosts() (*RemoteHostConfig, error) {
+	hostsPath, err := getHostsFilePath()
+	if err != nil {
+		return &RemoteHostConfig{}, err
+	}
+
+	data, err := os.ReadFile(hostsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &RemoteHostConfig{}, nil
+		}
+		return &RemoteHostConfig{}, err
+	}
+
+	var config RemoteHostConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return &RemoteHostConfig{}, err
+	}
+
+	return &config, nil
+}
+
+// SaveRemoteHosts saves remote host profiles to disk
+func SaveRemoteHosts(config *RemoteHostConfig) error {
+	hostsPath, err := getHostsFilePath()
+	if err != nil {
+		return err
+	}
+
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(hostsPath, data, 0644)
+}
+
+// AddRemoteHost adds a new remote host profile (or updates existing by SSHHost)
+func AddRemoteHost(sshHost, dataset string) error {
+	config, err := LoadRemoteHosts()
+	if err != nil {
+		config = &RemoteHostConfig{}
+	}
+
+	// Check if this host already exists - update it
+	for i, h := range config.Hosts {
+		if h.SSHHost == sshHost {
+			config.Hosts[i].Dataset = dataset
+			return SaveRemoteHosts(config)
+		}
+	}
+
+	// Extract a display name from the SSH host
+	name := sshHost
+	if parts := strings.Split(sshHost, "@"); len(parts) > 1 {
+		name = parts[1]
+	}
+
+	config.Hosts = append(config.Hosts, RemoteHost{
+		Name:    name,
+		SSHHost: sshHost,
+		Dataset: dataset,
+	})
+
+	return SaveRemoteHosts(config)
+}
+
+// RemoveRemoteHost removes a remote host profile by index
+func RemoveRemoteHost(index int) error {
+	config, err := LoadRemoteHosts()
+	if err != nil {
+		return err
+	}
+
+	if index < 0 || index >= len(config.Hosts) {
+		return nil
+	}
+
+	config.Hosts = append(config.Hosts[:index], config.Hosts[index+1:]...)
+	return SaveRemoteHosts(config)
+}
+
+// =============================================================================
+// Backup State
+// =============================================================================
 
 // BackupStage represents a stage in the backup process
 type BackupStage string

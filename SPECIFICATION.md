@@ -123,11 +123,18 @@ stateDiagram-v2
 **So that** I can add new backup media to my rotation
 
 **Acceptance Criteria:**
-- Prompts for device path
-- Requires double confirmation (destructive operation)
-- Creates encrypted ZFS pool with AES-256-GCM
-- Configures ZSTD compression
-- Optimizes atime settings
+- Two-phase input: prompts for device path, then pool name (defaults to NIXBACKUPS)
+- Requires confirmation with clear destructive warning
+- Clears existing ZFS labels on the device
+- Wipes all filesystem signatures using wipefs
+- Creates GPT partition table using sgdisk
+- Creates encrypted ZFS pool with:
+  - AES-256-GCM encryption
+  - Passphrase-based key format
+  - ZSTD compression
+  - atime disabled for performance
+- Uses `-f` flag to force pool creation
+- Interactive passphrase prompt during pool creation
 
 ### US-005: Safe Unmount
 **As a** user
@@ -181,26 +188,123 @@ stateDiagram-v2
 - Prompts to resume on startup if interrupted state exists
 - Continues from the interrupted stage
 
+### US-009: Remote Backup
+**As a** system administrator
+**I want to** pull ZFS backups from remote hosts via SSH
+**So that** I can consolidate backups from multiple machines onto one external drive
+
+**Acceptance Criteria:**
+- Prompts for SSH connection string (user@host)
+- Prompts for remote dataset path (e.g., NIXROOT/home)
+- Selects local backup pool as destination
+- Uses syncoid over SSH to pull incremental data
+- Namespaces backups by remote hostname (DESTPOOL/<hostname>/dataset)
+- Supports SSH key-based authentication
+- Imports/unlocks destination pool before sync
+- Safely exports pool on completion
+
+### US-010: Multi-Host Backup
+**As a** system administrator
+**I want to** store backups from multiple hosts on the same backup drive
+**So that** I can use one external drive for all my machines
+
+**Acceptance Criteria:**
+- Backups are namespaced by hostname on the backup pool
+- New local backups use DESTPOOL/<hostname>/home format
+- Backward compatible: existing flat DESTPOOL/home paths continue to work
+- Remote backups always use hostname namespacing
+- Different hosts' backups don't interfere with each other
+
+### US-012: Push Backup to Remote
+**As a** system administrator
+**I want to** push local ZFS snapshots to a remote backup server
+**So that** I can maintain off-site backups without requiring local external drives
+
+**Acceptance Criteria:**
+- Prompts for remote host SSH connection string (or select from saved hosts)
+- Prompts for remote destination pool name (e.g., NIXBACKUPS)
+- Selects local source pool
+- Creates recursive snapshot of all local datasets
+- Pushes all datasets via syncoid over SSH
+- Namespaces backups by local hostname on remote pool
+- Prunes old local snapshots after sync
+
+### US-013: All-Dataset Backup
+**As a** system administrator
+**I want to** back up ALL datasets in my source pool (not just home)
+**So that** my entire system state is protected
+
+**Acceptance Criteria:**
+- Automatically discovers all child datasets of source pool
+- Creates recursive snapshots (all datasets at once)
+- Syncs each dataset individually via syncoid
+- Reports progress per-dataset during sync
+- Continues to next dataset if one fails (non-fatal)
+- Applies to local backup, remote pull, and push operations
+
+### US-014: Saved Host Profiles
+**As a** user
+**I want** remote host connection details to persist across sessions
+**So that** I don't have to re-enter them every time
+
+**Acceptance Criteria:**
+- Host profiles saved to ~/.config/zfs-backup/hosts.json
+- Shows saved hosts when starting a remote operation
+- Option to add new host or select existing
+- Option to delete saved hosts (d key)
+- New hosts automatically saved after first use
+- Stores SSH connection string and dataset/pool name
+
+### US-015: Quota Management
+**As a** system administrator
+**I want to** view and edit ZFS dataset quotas from within the TUI
+**So that** I can control disk space usage without memorizing ZFS commands
+
+**Acceptance Criteria:**
+- Shows table of all datasets with name, type, quota, used, available
+- Allows editing quotas inline with enter/e key
+- Shows help text explaining unit notation (T, G, M, K)
+- Grays out datasets that don't support quotas (zvols)
+- Can remove quotas by entering "none" or pressing n
+- Shows pool total size and free space for reference
+- Refreshes after each quota change
+- Pool selection with unlock flow before showing quotas
+
+### US-011: Smart Pool Defaults
+**As a** user
+**I want the** source and destination pools to be intelligently pre-selected
+**So that** I don't have to manually select pools every time
+
+**Acceptance Criteria:**
+- Source pool defaults to first pool WITHOUT "BACKUP" in its name (case-insensitive)
+- Destination pool defaults to first pool WITH "BACKUP" in its name (case-insensitive)
+- Pool selection cursor pre-positions on the smart default
+- Falls back gracefully if no matching pool is found
+
 ## Functional Requirements
 
 ### FR-001: Main Menu Structure
 The main menu shall display items in this order:
 1. Backup ZFS (incremental)
-2. Restore Files
-3. Show zpool info
-4. Pool Maintenance
-5. Unmount Backup Disk
-6. Help
-7. Exit
-8. --- Danger Zone ---
-9. Prepare Backup Device
-10. Force Backup ZFS (destructive)
+2. Remote Backup ZFS
+3. Restore Files
+4. Show zpool info
+5. Pool Maintenance
+6. Recover Failed Backup
+7. Unmount Backup Disk
+8. Help
+9. Exit
+10. --- Danger Zone ---
+11. Prepare Backup Device
+12. Force Backup ZFS (destructive)
 
 Navigation skips the separator when using up/down keys.
 
 ### FR-002: Pool Selection
-- Display all available ZFS pools
+- Display all available ZFS pools (imported and importable)
 - Allow selecting source and destination pools
+- Smart defaults: source prefers non-BACKUP pool, dest prefers BACKUP pool
+- Pre-select smart default in pool list cursor position
 - Show pool names and encryption status
 - Support both interactive and CLI modes
 
@@ -322,6 +426,7 @@ Support command-line flags for automation:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.3.0 | 2026-05 | Added pull/push remote backup via SSH; multi-host support with hostname namespacing; all-dataset backup; smart pool defaults; saved host profiles; fixed force backup flow |
 | 1.2.0 | 2026-03 | Added "Pool Maintenance" with scrub control; fixed pool import/unlock flow; scrollable result reports |
 | 1.1.0 | 2026 | Added "Show zpool info" feature; simplified UI by removing emojis |
 | 1.0.0 | 2025 | Initial release with backup, restore, prepare, unmount |
