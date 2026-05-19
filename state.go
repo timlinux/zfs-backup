@@ -24,21 +24,22 @@ type RemoteHostConfig struct {
 	Hosts []RemoteHost `json:"hosts"`
 }
 
-// getConfigDir returns the config directory path, creating it if needed
+// getConfigDir returns the config directory path, creating it if needed.
+// Uses the real user's home directory even when running under sudo.
 func getConfigDir() (string, error) {
-	configDir, err := os.UserConfigDir()
+	home, err := getRealUserHome()
 	if err != nil {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		configDir = filepath.Join(home, ".config")
+		return "", err
 	}
+	configDir := filepath.Join(home, ".config")
 
 	appDir := filepath.Join(configDir, "zfs-backup")
 	if err := os.MkdirAll(appDir, 0755); err != nil {
 		return "", err
 	}
+
+	// Fix ownership when running under sudo
+	chownToRealUser(appDir)
 
 	return appDir, nil
 }
@@ -165,22 +166,21 @@ type BackupState struct {
 	StageTimings   map[BackupStage]time.Duration `json:"stage_timings"` // Historical timings
 }
 
-// getStateFilePath returns the path to the state file
+// getStateFilePath returns the path to the state file.
+// Uses the real user's home directory even when running under sudo.
 func getStateFilePath() (string, error) {
-	cacheDir, err := os.UserCacheDir()
+	home, err := getRealUserHome()
 	if err != nil {
-		// Fallback to home directory
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		cacheDir = filepath.Join(home, ".cache")
+		return "", err
 	}
+	cacheDir := filepath.Join(home, ".cache")
 
 	appDir := filepath.Join(cacheDir, "zfs-backup")
 	if err := os.MkdirAll(appDir, 0755); err != nil {
 		return "", err
 	}
+
+	chownToRealUser(appDir)
 
 	return filepath.Join(appDir, "backup-state.json"), nil
 }
@@ -270,15 +270,25 @@ func (s *BackupState) GetProgress(totalStages int) float64 {
 	return float64(len(s.CompletedStages)) / float64(totalStages) * 100
 }
 
-// EstimateTimeRemaining estimates time remaining based on average stage duration
+// EstimateTimeRemaining estimates time remaining based on completed stage durations.
+// Uses actual recorded stage timings rather than wall clock, so the estimate
+// decreases (not increases) as stages complete.
 func (s *BackupState) EstimateTimeRemaining(totalStages int) time.Duration {
-	if len(s.CompletedStages) == 0 {
+	if len(s.StageTimings) == 0 {
 		return 0
 	}
 
-	elapsed := time.Since(s.StartTime)
-	avgTimePerStage := elapsed / time.Duration(len(s.CompletedStages))
+	// Sum actual completed stage durations
+	var totalDuration time.Duration
+	for _, d := range s.StageTimings {
+		totalDuration += d
+	}
+
+	avgTimePerStage := totalDuration / time.Duration(len(s.StageTimings))
 	remainingStages := totalStages - len(s.CompletedStages)
+	if remainingStages < 0 {
+		remainingStages = 0
+	}
 
 	return avgTimePerStage * time.Duration(remainingStages)
 }

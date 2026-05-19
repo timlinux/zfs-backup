@@ -236,11 +236,21 @@ stateDiagram-v2
 
 **Acceptance Criteria:**
 - Automatically discovers all child datasets of source pool
+- Skips non-mounted datasets (mountpoint "-") such as application-specific datasets
 - Creates recursive snapshots (all datasets at once)
 - Syncs each dataset individually via syncoid
-- Reports progress per-dataset during sync
+- Pre-creates destination datasets before sync to prevent hangs on new datasets
+- Per-dataset progress bar and snapshot dot matrix during sync
+- Snapshot dots use Kartoza brand colors: gray=pending, orange=syncing, blue=done, red=error
+- Errors shown only via dot colors during sync; full error details in final report
+- Final report includes per-dataset timing, sizes, snapshot counts, and error details
 - Continues to next dataset if one fails (non-fatal)
+- Per-dataset timeout prevents infinite hangs
 - Applies to local backup, remote pull, and push operations
+- Report written to markdown and PDF at end of each backup
+- Reports saved to ~/.local/share/zfs-backup/reports/
+- Filename: {Operation}-{Source}-to-{Dest}-{DDMonYYYY}-{HHhMM}-Report.{md,pdf}
+- PDF generated via pandoc (graceful fallback if unavailable)
 
 ### US-014: Saved Host Profiles
 **As a** user
@@ -392,11 +402,21 @@ Support command-line flags for automation:
 - Fixed header and footer
 - Scrollable content area
 - Minimal, text-based UI without emojis for better terminal compatibility
+- Per-dataset progress visualization during sync stage:
+  - Global progress bar for overall backup stages
+  - Individual dataset status shown as colored dots in a vertical list
+  - Gray circle (○) = pending, Orange spinner = syncing, Blue dot (●) = done, Red dot (●) = error
+  - Summary line showing datasets synced count and error count
+  - Inline error messages for failed datasets
+  - Legend bar explaining dot colors
 
 ### NFR-002: Error Handling
 - Clear error messages displayed to user
 - Errors saved to state for resume functionality
 - Non-destructive operations recover gracefully
+- Destination datasets are pre-created before syncoid runs to prevent hangs when a new dataset appears on the source pool
+- Per-dataset syncoid timeout (4 hours) prevents a single stuck sync from blocking the entire backup
+- Remote destination datasets are created via SSH before push operations
 
 ### NFR-003: Dependencies
 - Go with Bubble Tea, Bubbles, Lipgloss

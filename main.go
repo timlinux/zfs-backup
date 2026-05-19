@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,11 +17,14 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// appVersion is set at build time via -ldflags "-X main.appVersion=..."
+// Source of truth: VERSION file in the repo root.
+var appVersion = "dev"
+
 // Application constants
 const (
 	appName    = "Kartoza ZFS Backup"
 	appTagline = "Keep your ZFS Backed Up!"
-	appVersion = "1.3.0"
 
 	// URLs for footer links
 	kartozaURL  = "https://kartoza.com"
@@ -343,6 +347,11 @@ func (m model) getStatusText() string {
 		return "Pool Maintenance"
 	case stateQuotaManage:
 		return "Dataset Manager"
+	case stateReports:
+		if m.reportViewing {
+			return "Viewing Report"
+		}
+		return "Browse Reports"
 	default:
 		return "Idle"
 	}
@@ -366,12 +375,22 @@ func (m model) getHotkeys() string {
 		return "enter submit • esc cancel"
 	case stateRunning:
 		return "ctrl+c cancel (resumable)"
-	case stateResult, stateHelp, stateZpoolInfo:
+	case stateResult:
+		if m.lastReportPdf != "" || m.lastReportMd != "" {
+			return "p open report • enter/esc return to menu"
+		}
+		return "enter/esc return to menu"
+	case stateHelp, stateZpoolInfo:
 		return "enter/esc return to menu"
 	case stateMaintenance:
 		return "s start scrub • x stop scrub • r refresh • esc return"
 	case stateQuotaManage:
 		return "↑/k up • ↓/j down • e edit quota • c create • d delete • n no quota • esc return"
+	case stateReports:
+		if m.reportViewing {
+			return "scroll up/down • esc back to list"
+		}
+		return "↑/k up • ↓/j down • enter view • p open report • d delete • esc return"
 	case stateResume:
 		return "y resume • n start fresh • esc back"
 	default:
@@ -398,6 +417,7 @@ const (
 	stateZpoolInfo
 	stateMaintenance
 	stateQuotaManage
+	stateReports
 )
 
 type menuItem struct {
@@ -415,6 +435,7 @@ var mainMenuItems = []menuItem{
 	{title: "Show zpool info", description: "Show detailed information about ZFS pool structure, status and health", icon: ""},
 	{title: "Pool Maintenance", description: "Start, stop, or monitor scrub operations for data integrity verification", icon: ""},
 	{title: "Manage Datasets", description: "View/edit quotas, create and delete ZFS datasets", icon: ""},
+	{title: "Browse Reports", description: "View previous backup reports with timings, sizes, and error details", icon: ""},
 	{title: "Recover Failed Backup", description: "Fix broken sync state when backup was interrupted or snapshot was deleted", icon: ""},
 	{title: "Unmount Backup Disk", description: "Safely export the backup pool and power off the USB drive", icon: ""},
 	{title: "Help", description: "Show detailed help information about all operations", icon: ""},
@@ -456,7 +477,11 @@ type model struct {
 	poolSelectIndex  int       // Current pool selection index
 	selectingSource  bool      // true = selecting source, false = selecting dest
 	// Progress channel for real-time updates
-	progressChan     chan progressUpdate
+	progressChan       chan progressUpdate
+	// Per-dataset sync progress (populated during sync stage)
+	datasetProgress    []DatasetProgress
+	currentDataset     int // Index of currently syncing dataset (-1 if none)
+	operationStartTime time.Time // When the current operation started
 	// Restore mode
 	restoreModel     RestoreModel
 	// Zpool info viewer
@@ -496,6 +521,14 @@ type model struct {
 	datasetForm        datasetCreateForm // Form data
 	// Dataset deletion
 	datasetDeleting    bool           // Are we confirming a delete?
+	// Report browser
+	reportFiles        []reportEntry  // List of report files
+	reportIndex        int            // Selection cursor in report list
+	reportViewport     viewport.Model // Viewport for viewing a report
+	reportViewing      bool           // Are we viewing a report (vs listing)?
+	// Last generated report (for opening from result screen)
+	lastReportMd       string         // Path to last generated markdown report
+	lastReportPdf      string         // Path to last generated PDF report
 }
 
 // =============================================================================
@@ -503,6 +536,91 @@ type model struct {
 // =============================================================================
 
 // quotaEntry holds quota information for a single dataset
+// reportEntry represents a report file in the report browser
+type reportEntry struct {
+	Name    string    // Filename (without path)
+	Path    string    // Full path to the .md file
+	PdfPath string    // Full path to the .pdf file (may not exist)
+	ModTime time.Time // Last modified time
+}
+
+// reportsLoadedMsg is sent when report files are loaded
+type reportsLoadedMsg struct {
+	reports []reportEntry
+	err     error
+}
+
+// reportContentMsg is sent when a report's content is loaded
+type reportContentMsg struct {
+	content string
+	err     error
+}
+
+// loadReportFiles scans the reports directory and returns entries
+func loadReportFiles() tea.Cmd {
+	return func() tea.Msg {
+		dir, err := getReportsDir()
+		if err != nil {
+			return reportsLoadedMsg{err: err}
+		}
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return reportsLoadedMsg{err: err}
+		}
+
+		var reports []reportEntry
+		seen := make(map[string]bool)
+		// Walk in reverse so newest files are first
+		for i := len(entries) - 1; i >= 0; i-- {
+			e := entries[i]
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if !strings.HasSuffix(name, ".md") {
+				continue
+			}
+			baseName := strings.TrimSuffix(name, ".md")
+			if seen[baseName] {
+				continue
+			}
+			seen[baseName] = true
+
+			info, _ := e.Info()
+			modTime := time.Time{}
+			if info != nil {
+				modTime = info.ModTime()
+			}
+
+			pdfPath := filepath.Join(dir, baseName+".pdf")
+			if _, err := os.Stat(pdfPath); err != nil {
+				pdfPath = ""
+			}
+
+			reports = append(reports, reportEntry{
+				Name:    baseName,
+				Path:    filepath.Join(dir, name),
+				PdfPath: pdfPath,
+				ModTime: modTime,
+			})
+		}
+
+		return reportsLoadedMsg{reports: reports}
+	}
+}
+
+// loadReportContent reads a report file for display
+func loadReportContent(path string) tea.Cmd {
+	return func() tea.Msg {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return reportContentMsg{err: err}
+		}
+		return reportContentMsg{content: string(data)}
+	}
+}
+
 type quotaEntry struct {
 	Name        string // Dataset name (e.g., NIXROOT/home)
 	Type        string // "filesystem" or "volume"
@@ -882,6 +1000,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.zpoolViewport.Width = viewportWidth
 			m.zpoolViewport.Height = viewportHeight
 		}
+		// Update viewport size if viewing a report
+		if m.state == stateReports && m.reportViewing {
+			viewportHeight := msg.Height - 12
+			if viewportHeight < 5 {
+				viewportHeight = 5
+			}
+			viewportWidth := msg.Width - 8
+			if viewportWidth < 40 {
+				viewportWidth = 40
+			}
+			m.reportViewport.Width = viewportWidth
+			m.reportViewport.Height = viewportHeight
+		}
 		// Update viewport size if in result state
 		if m.state == stateResult && m.resultReady {
 			viewportHeight := msg.Height - 12
@@ -995,10 +1126,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// For push-backup, skip dest selection (dest is remote)
 						if m.operation == "push-backup" {
 							m.selectingPool = false
-							m.state = statePassword
-							m.passwordInput.SetValue("")
-							m.passwordInput.Focus()
-							return m, textinput.Blink
+							// Check if pool needs import/unlock before prompting
+							return m, m.preparePoolAccess(selectedPool)
 						}
 
 						// Now select destination
@@ -1024,24 +1153,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.destPool = selectedPool
 						m.selectingPool = false
 
-						// Handle zpoolinfo and maintenance operations specially
-						if m.operation == "zpoolinfo" || m.operation == "maintenance" || m.operation == "quotas" {
-							if m.operation == "zpoolinfo" {
-								m.zpoolInfoPool = selectedPool
-							} else if m.operation == "maintenance" {
-								m.maintenancePool = selectedPool
-							} else {
-								m.quotaPool = selectedPool
-							}
-							// Use async command to import pool if needed and check encryption
-							return m, m.preparePoolAccess(selectedPool)
+						// Set up operation-specific pool references
+						if m.operation == "zpoolinfo" {
+							m.zpoolInfoPool = selectedPool
+						} else if m.operation == "maintenance" {
+							m.maintenancePool = selectedPool
+						} else if m.operation == "quotas" {
+							m.quotaPool = selectedPool
 						}
 
-						// For other operations, proceed to password
-						m.state = statePassword
-						m.passwordInput.SetValue("")
-						m.passwordInput.Focus()
-						return m, textinput.Blink
+						// Smart pool access: import if needed, skip password if already unlocked
+						return m, m.preparePoolAccess(selectedPool)
 					}
 				}
 				return m, nil
@@ -1112,7 +1234,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Open Kartoza website
 				return m, openURL(kartozaURL)
 
-			case "O":
+			case "o", "O":
 				// Open Donate page
 				return m, openURL(donateURL)
 
@@ -1192,6 +1314,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.operation = "quotas"
 					m.startPoolSelection(false)
 					return m, nil
+				case "Browse Reports":
+					m.state = stateReports
+					m.reportViewing = false
+					m.reportIndex = 0
+					return m, loadReportFiles()
 				case "Recover Failed Backup":
 					m.operation = "recover"
 					m.startPoolSelection(true)
@@ -1338,12 +1465,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.state == stateResume {
 			switch msg.String() {
 			case "y", "Y":
-				// Resume the backup
-				m.state = statePassword
+				// Resume the backup - check if pool still needs unlock
 				m.operation = m.resumeState.Operation
-				m.passwordInput.SetValue("")
-				m.passwordInput.Focus()
-				return m, textinput.Blink
+				return m, m.preparePoolAccess(m.destPool)
 			case "n", "N", "esc":
 				// Start fresh, clear state
 				_ = ClearBackupState()
@@ -1359,6 +1483,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter", "esc", "q":
 				m.state = stateMenu
 				m.resultReady = false
+				return m, nil
+			case "p":
+				// Open report (PDF or markdown fallback)
+				if m.lastReportPdf != "" {
+					_ = openFileForUser(m.lastReportPdf)
+				} else if m.lastReportMd != "" {
+					_ = openFileForUser(m.lastReportMd)
+				}
 				return m, nil
 			case "ctrl+c":
 				m.quitting = true
@@ -1385,6 +1517,73 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var cmd tea.Cmd
 				m.zpoolViewport, cmd = m.zpoolViewport.Update(msg)
 				return m, cmd
+			}
+		} else if m.state == stateReports {
+			if m.reportViewing {
+				// Viewing a report - scroll or go back
+				switch msg.String() {
+				case "esc", "q":
+					m.reportViewing = false
+					return m, nil
+				case "ctrl+c":
+					m.quitting = true
+					return m, tea.Quit
+				default:
+					var cmd tea.Cmd
+					m.reportViewport, cmd = m.reportViewport.Update(msg)
+					return m, cmd
+				}
+			} else {
+				// Browsing report list
+				switch msg.String() {
+				case "up", "k":
+					if m.reportIndex > 0 {
+						m.reportIndex--
+					}
+					return m, nil
+				case "down", "j":
+					if m.reportIndex < len(m.reportFiles)-1 {
+						m.reportIndex++
+					}
+					return m, nil
+				case "enter":
+					if len(m.reportFiles) > 0 {
+						return m, loadReportContent(m.reportFiles[m.reportIndex].Path)
+					}
+					return m, nil
+				case "p":
+					// Open report (PDF or markdown fallback)
+					if len(m.reportFiles) > 0 {
+						entry := m.reportFiles[m.reportIndex]
+						if entry.PdfPath != "" {
+							_ = openFileForUser(entry.PdfPath)
+						} else {
+							_ = openFileForUser(entry.Path)
+						}
+					}
+					return m, nil
+				case "d":
+					// Delete selected report
+					if len(m.reportFiles) > 0 {
+						entry := m.reportFiles[m.reportIndex]
+						_ = os.Remove(entry.Path)
+						if entry.PdfPath != "" {
+							_ = os.Remove(entry.PdfPath)
+						}
+						if m.reportIndex >= len(m.reportFiles)-1 && m.reportIndex > 0 {
+							m.reportIndex--
+						}
+						return m, loadReportFiles()
+					}
+					return m, nil
+				case "esc", "q":
+					m.state = stateMenu
+					return m, nil
+				case "ctrl+c":
+					m.quitting = true
+					return m, tea.Quit
+				}
+				return m, nil
 			}
 		} else if m.state == stateMaintenance {
 			switch msg.String() {
@@ -1542,6 +1741,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentStage = msg.stage
 		m.totalStages = msg.totalStages
 		m.backupState = msg.state
+		m.datasetProgress = msg.datasets
+		m.currentDataset = msg.currentDataset
 
 		// Calculate progress percentage
 		progress := float64(msg.stageNum) / float64(msg.totalStages)
@@ -1602,14 +1803,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.passwordInput.Focus()
 			return m, textinput.Blink
 		}
-		// No password needed, proceed to load info/maintenance/quotas
-		if m.operation == "zpoolinfo" {
+		// No password needed - route to the appropriate action
+		switch m.operation {
+		case "zpoolinfo":
 			return m, m.loadZpoolInfo()
-		}
-		if m.operation == "quotas" {
+		case "quotas":
 			return m, loadQuotaData(m.quotaPool)
+		case "maintenance":
+			return m, m.loadMaintenanceStatus()
+		case "backup", "force-backup", "recover", "remote-backup", "push-backup":
+			// Pool is already imported and unlocked - start the operation directly
+			m.password = ""
+			var newM model
+			var cmd tea.Cmd
+			newM, cmd = m.startOperation()
+			return newM, cmd
+		default:
+			// Unmount, prepare, etc. - start directly
+			m.password = ""
+			var newM model
+			var cmd tea.Cmd
+			newM, cmd = m.startOperation()
+			return newM, cmd
 		}
-		return m, m.loadMaintenanceStatus()
 
 	case maintenanceStatusMsg:
 		if msg.err != nil {
@@ -1693,6 +1909,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.quotaIndex = 0
 		return m, loadQuotaData(m.quotaPool)
 
+	case reportsLoadedMsg:
+		if msg.err != nil {
+			m.state = stateResult
+			m.err = msg.err
+			m.message = ""
+			return m, nil
+		}
+		m.reportFiles = msg.reports
+		m.reportIndex = 0
+		m.reportViewing = false
+		return m, nil
+
+	case reportContentMsg:
+		if msg.err != nil {
+			m.state = stateResult
+			m.err = msg.err
+			m.message = ""
+			return m, nil
+		}
+		viewportHeight := m.height - 12
+		if viewportHeight < 5 {
+			viewportHeight = 5
+		}
+		viewportWidth := m.width - 8
+		if viewportWidth < 40 {
+			viewportWidth = 40
+		}
+		m.reportViewport = viewport.New(viewportWidth, viewportHeight)
+		m.reportViewport.SetContent(msg.content)
+		m.reportViewport.Style = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorHighlight4).
+			Padding(0, 1)
+		m.reportViewing = true
+		return m, nil
+
 	case progress.FrameMsg:
 		// Handle progress for restore mode too
 		if m.state == stateRestore {
@@ -1720,6 +1972,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateResult
 		m.message = msg.message
 		m.err = msg.err
+		// Keep datasetProgress for the final report (don't clear it)
+		m.currentDataset = -1
 
 		// Set up viewport for scrollable result display
 		viewportHeight := m.height - 12
@@ -1730,8 +1984,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if viewportWidth < 40 {
 			viewportWidth = 40
 		}
+
+		// Build result content with dataset dashboard appended
+		resultContent := msg.message
+		if len(m.datasetProgress) > 0 {
+			resultContent += "\n" + m.renderDatasetReport(viewportWidth)
+		}
+
+		// Write report to markdown and PDF for all operations
+		reportInfo := ReportInfo{
+			Operation:       m.operation,
+			SourcePool:      m.sourcePool,
+			DestPool:        m.destPool,
+			RemoteHost:      m.remoteHost,
+			StartTime:       m.operationStartTime,
+			EndTime:         time.Now(),
+			DatasetProgress: m.datasetProgress,
+			Success:         msg.err == nil,
+			OperationLog:    msg.message,
+		}
+		if msg.err != nil {
+			reportInfo.ErrorMessage = msg.err.Error()
+		}
+		mdPath, pdfPath, reportErr := writeBackupReport(reportInfo)
+		m.lastReportMd = ""
+		m.lastReportPdf = ""
+		if reportErr == nil {
+			m.lastReportMd = mdPath
+			m.lastReportPdf = pdfPath
+			resultContent += "\n\nReport saved: " + mdPath
+			if pdfPath != "" {
+				resultContent += "\nPDF report:   " + pdfPath
+				resultContent += "\n\nPress 'p' to open the report"
+			}
+		} else {
+			resultContent += "\n\nWarning: could not write report: " + reportErr.Error()
+		}
+
 		m.resultViewport = viewport.New(viewportWidth, viewportHeight)
-		m.resultViewport.SetContent(msg.message)
+		m.resultViewport.SetContent(resultContent)
 		m.resultViewport.Style = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorHighlight4).
@@ -1856,6 +2147,8 @@ func (m model) renderContentNopad(width int) string {
 		content.WriteString(m.renderMaintenanceContent(width))
 	case stateQuotaManage:
 		content.WriteString(m.renderQuotaContent(width))
+	case stateReports:
+		content.WriteString(m.renderReportsContent(width))
 	case stateRestore:
 		// Restore mode has its own full view, handled in View()
 	}
@@ -2185,7 +2478,7 @@ func (m model) renderPasswordContent(width int) string {
 	return b.String()
 }
 
-// renderRunningContent renders the operation progress view
+// renderRunningContent renders the operation progress view with per-dataset dot grid
 func (m model) renderRunningContent(width int) string {
 	var b strings.Builder
 
@@ -2208,7 +2501,7 @@ func (m model) renderRunningContent(width int) string {
 		Render(stageText)
 	b.WriteString(stageLine + "\n\n")
 
-	// Progress bar
+	// Progress bar and stage info
 	if m.backupState != nil && m.totalStages > 0 {
 		percent := float64(len(m.backupState.CompletedStages)) / float64(m.totalStages)
 		progressBar := lipgloss.NewStyle().
@@ -2241,6 +2534,11 @@ func (m model) renderRunningContent(width int) string {
 			Align(lipgloss.Center).
 			Render(infoStyle.Render(fmt.Sprintf("Elapsed: %s", formatDuration(elapsed))))
 		b.WriteString(elapsedLine + "\n\n")
+
+		// Per-dataset progress grid (shown during sync stage)
+		if len(m.datasetProgress) > 0 {
+			b.WriteString(m.renderDatasetGrid(width))
+		}
 	} else {
 		initLine := lipgloss.NewStyle().
 			Width(width).
@@ -2252,7 +2550,385 @@ func (m model) renderRunningContent(width int) string {
 	return b.String()
 }
 
+// renderDatasetGrid renders per-dataset progress bars and a snapshot dot matrix
+// for the currently syncing dataset
+func (m model) renderDatasetGrid(width int) string {
+	var b strings.Builder
+
+	// Styles
+	dotPending := lipgloss.NewStyle().Foreground(colorHighlight3) // Gray
+	dotSyncing := lipgloss.NewStyle().Foreground(colorHighlight1) // Orange
+	dotDone := lipgloss.NewStyle().Foreground(colorHighlight2)    // Blue
+	dotError := lipgloss.NewStyle().Foreground(colorAlert)        // Red
+	labelDim := lipgloss.NewStyle().Foreground(colorHighlight3)
+	labelActive := lipgloss.NewStyle().Foreground(colorHighlight1).Bold(true)
+	labelDone := lipgloss.NewStyle().Foreground(colorHighlight2)
+	labelError := lipgloss.NewStyle().Foreground(colorAlert)
+
+	// Count completed datasets for the dataset-level progress bar
+	doneCount := 0
+	errorCount := 0
+	for _, ds := range m.datasetProgress {
+		switch ds.Status {
+		case DatasetDone:
+			doneCount++
+		case DatasetError, DatasetSkipped:
+			doneCount++ // Count towards progress (attempted)
+			errorCount++
+		}
+	}
+
+	// Dataset-level progress bar
+	dsPercent := float64(0)
+	if len(m.datasetProgress) > 0 {
+		dsPercent = float64(doneCount) / float64(len(m.datasetProgress))
+	}
+	dsProgressBar := progress.New(
+		progress.WithGradient(string(colorHighlight4), string(colorHighlight2)),
+	)
+	barWidth := width - 20
+	if barWidth < 30 {
+		barWidth = 30
+	}
+	if barWidth > 60 {
+		barWidth = 60
+	}
+	dsProgressBar.Width = barWidth
+
+	syncHeader := fmt.Sprintf("Datasets %d/%d", doneCount, len(m.datasetProgress))
+	if errorCount > 0 {
+		syncHeader += fmt.Sprintf(" (%d failed)", errorCount)
+	}
+	headerLine := lipgloss.NewStyle().
+		Width(width).
+		Align(lipgloss.Center).
+		Render(infoStyle.Render(syncHeader))
+	b.WriteString(headerLine + "\n")
+
+	dsBar := lipgloss.NewStyle().
+		Width(width).
+		Align(lipgloss.Center).
+		Render(dsProgressBar.ViewAs(dsPercent))
+	b.WriteString(dsBar + "\n\n")
+
+	// Find the longest dataset name for alignment
+	maxNameLen := 0
+	for _, ds := range m.datasetProgress {
+		if len(ds.Name) > maxNameLen {
+			maxNameLen = len(ds.Name)
+		}
+	}
+
+	// Render each dataset as a compact status line
+	for i, ds := range m.datasetProgress {
+		var statusIcon string
+		var label string
+
+		switch ds.Status {
+		case DatasetPending:
+			statusIcon = dotPending.Render("○")
+			label = labelDim.Render(ds.Name)
+		case DatasetSyncing:
+			statusIcon = dotSyncing.Render(m.spinner.View())
+			label = labelActive.Render(ds.Name)
+		case DatasetDone:
+			statusIcon = dotDone.Render("●")
+			label = labelDone.Render(ds.Name)
+		case DatasetError:
+			statusIcon = dotError.Render("●")
+			label = labelError.Render(ds.Name)
+		case DatasetSkipped:
+			statusIcon = dotError.Render("○")
+			label = labelError.Render(ds.Name)
+		}
+
+		row := fmt.Sprintf("  %s %s", statusIcon, label)
+
+		line := lipgloss.NewStyle().
+			Width(width).
+			Align(lipgloss.Center).
+			Render(row)
+		b.WriteString(line + "\n")
+
+		// Show snapshot dot matrix for the currently syncing dataset
+		if i == m.currentDataset && len(ds.Snapshots) > 0 {
+			b.WriteString(m.renderSnapshotMatrix(ds.Snapshots, width))
+		}
+	}
+
+	b.WriteString("\n")
+
+	// Legend
+	legend := fmt.Sprintf("%s pending  %s syncing  %s done  %s error",
+		dotPending.Render("○"),
+		dotSyncing.Render("●"),
+		dotDone.Render("●"),
+		dotError.Render("●"),
+	)
+	legendLine := lipgloss.NewStyle().
+		Width(width).
+		Align(lipgloss.Center).
+		Render(labelDim.Render(legend))
+	b.WriteString(legendLine + "\n")
+
+	return b.String()
+}
+
+// renderSnapshotMatrix renders a rectangular grid of dots representing snapshots
+// for a single dataset. Each dot is colored by its sync status.
+func (m model) renderSnapshotMatrix(snapshots []SnapshotDot, width int) string {
+	var b strings.Builder
+
+	dotPending := lipgloss.NewStyle().Foreground(colorHighlight3) // Gray
+	dotSyncing := lipgloss.NewStyle().Foreground(colorHighlight1) // Orange
+	dotDone := lipgloss.NewStyle().Foreground(colorHighlight2)    // Blue
+	dotError := lipgloss.NewStyle().Foreground(colorAlert)        // Red
+
+	// Calculate grid dimensions
+	// Each dot takes 2 chars (dot + space), leave margins for centering
+	maxDotsPerRow := (width - 12) / 2
+	if maxDotsPerRow < 10 {
+		maxDotsPerRow = 10
+	}
+	if maxDotsPerRow > 40 {
+		maxDotsPerRow = 40
+	}
+
+	// Build rows of dots
+	var row strings.Builder
+	for i, snap := range snapshots {
+		if i > 0 && i%maxDotsPerRow == 0 {
+			// Flush current row
+			line := lipgloss.NewStyle().
+				Width(width).
+				Align(lipgloss.Center).
+				Render(row.String())
+			b.WriteString(line + "\n")
+			row.Reset()
+		}
+
+		var dot string
+		switch snap.Status {
+		case SnapPending:
+			dot = dotPending.Render("○")
+		case SnapSyncing:
+			dot = dotSyncing.Render("●")
+		case SnapDone:
+			dot = dotDone.Render("●")
+		case SnapError:
+			dot = dotError.Render("●")
+		}
+
+		if i%maxDotsPerRow > 0 {
+			row.WriteString(" ")
+		}
+		row.WriteString(dot)
+	}
+
+	// Flush last row
+	if row.Len() > 0 {
+		line := lipgloss.NewStyle().
+			Width(width).
+			Align(lipgloss.Center).
+			Render(row.String())
+		b.WriteString(line + "\n")
+	}
+
+	// Show snapshot count
+	countText := fmt.Sprintf("%d snapshots", len(snapshots))
+	countLine := lipgloss.NewStyle().
+		Width(width).
+		Align(lipgloss.Center).
+		Render(lipgloss.NewStyle().Foreground(colorHighlight3).Render(countText))
+	b.WriteString(countLine + "\n")
+
+	return b.String()
+}
+
+// renderDatasetReport renders the final dataset sync report with timings, sizes,
+// errors, and snapshot dot grids. Shown in the result view after backup completes.
+func (m model) renderDatasetReport(width int) string {
+	var b strings.Builder
+
+	b.WriteString("\n")
+	b.WriteString(strings.Repeat("─", width) + "\n")
+	b.WriteString("  DATASET SYNC REPORT\n")
+	b.WriteString(strings.Repeat("─", width) + "\n\n")
+
+	doneCount := 0
+	errorCount := 0
+	var totalDuration time.Duration
+	for _, ds := range m.datasetProgress {
+		totalDuration += ds.Duration
+		switch ds.Status {
+		case DatasetDone:
+			doneCount++
+		case DatasetError, DatasetSkipped:
+			errorCount++
+		}
+	}
+
+	b.WriteString(fmt.Sprintf("  Total datasets: %d  |  Synced: %d  |  Failed: %d\n", len(m.datasetProgress), doneCount, errorCount))
+	b.WriteString(fmt.Sprintf("  Total sync time: %s\n\n", formatDuration(totalDuration)))
+
+	for _, ds := range m.datasetProgress {
+		// Status indicator
+		var statusStr string
+		switch ds.Status {
+		case DatasetDone:
+			statusStr = "[OK]"
+		case DatasetError:
+			statusStr = "[FAIL]"
+		case DatasetSkipped:
+			statusStr = "[SKIP]"
+		case DatasetPending:
+			statusStr = "[--]"
+		default:
+			statusStr = "[??]"
+		}
+
+		// Dataset header line: status name (size) duration
+		line := fmt.Sprintf("  %s %s", statusStr, ds.Name)
+		if ds.Size != "" && ds.Size != "?" {
+			line += fmt.Sprintf(" (%s)", ds.Size)
+		}
+		if ds.Duration > 0 {
+			line += fmt.Sprintf("  %s", formatDuration(ds.Duration))
+		}
+		line += fmt.Sprintf("  %d snapshots", len(ds.Snapshots))
+		b.WriteString(line + "\n")
+
+		// Show snapshot dot matrix
+		if len(ds.Snapshots) > 0 {
+			b.WriteString(m.renderSnapshotMatrixPlain(ds.Snapshots, width))
+		}
+
+		// Show error details for failed datasets
+		if ds.ErrorMsg != "" {
+			b.WriteString(fmt.Sprintf("    Error: %s\n", ds.ErrorMsg))
+		}
+
+		b.WriteString("\n")
+	}
+
+	// Legend
+	b.WriteString(fmt.Sprintf("  Legend: ○ pending  ● synced  ● error\n"))
+
+	return b.String()
+}
+
+// renderSnapshotMatrixPlain renders snapshot dots without lipgloss styling (for the
+// scrollable result viewport which doesn't support ANSI well in all terminals).
+// Uses plain Unicode characters.
+func (m model) renderSnapshotMatrixPlain(snapshots []SnapshotDot, width int) string {
+	var b strings.Builder
+
+	maxDotsPerRow := (width - 8) / 2
+	if maxDotsPerRow < 10 {
+		maxDotsPerRow = 10
+	}
+	if maxDotsPerRow > 40 {
+		maxDotsPerRow = 40
+	}
+
+	var row strings.Builder
+	row.WriteString("    ")
+	for i, snap := range snapshots {
+		if i > 0 && i%maxDotsPerRow == 0 {
+			b.WriteString(row.String() + "\n")
+			row.Reset()
+			row.WriteString("    ")
+		}
+		if i%maxDotsPerRow > 0 {
+			row.WriteString(" ")
+		}
+		switch snap.Status {
+		case SnapDone:
+			row.WriteString("●")
+		case SnapError:
+			row.WriteString("✕")
+		default:
+			row.WriteString("○")
+		}
+	}
+	if row.Len() > 4 {
+		b.WriteString(row.String() + "\n")
+	}
+
+	return b.String()
+}
+
 // renderResumeContent renders the resume prompt
+// renderReportsContent renders the report browser view
+func (m model) renderReportsContent(width int) string {
+	var b strings.Builder
+
+	if m.reportViewing {
+		// Show the report content in a scrollable viewport
+		contentTitle := lipgloss.NewStyle().
+			Width(width).
+			Align(lipgloss.Center).
+			Render(selectedItemStyle.Render("Backup Report"))
+		b.WriteString(contentTitle + "\n\n")
+		b.WriteString(m.reportViewport.View())
+		return b.String()
+	}
+
+	// Report list view
+	contentTitle := lipgloss.NewStyle().
+		Width(width).
+		Align(lipgloss.Center).
+		Render(selectedItemStyle.Render("Backup Reports"))
+	b.WriteString(contentTitle + "\n\n")
+
+	if len(m.reportFiles) == 0 {
+		emptyMsg := lipgloss.NewStyle().
+			Width(width).
+			Align(lipgloss.Center).
+			Render(infoStyle.Render("No reports found. Reports are generated after each backup run."))
+		b.WriteString(emptyMsg + "\n\n")
+
+		pathMsg := lipgloss.NewStyle().
+			Width(width).
+			Align(lipgloss.Center).
+			Render(subtitleStyle.Render("Reports are saved to ~/.local/share/zfs-backup/reports/"))
+		b.WriteString(pathMsg + "\n")
+		return b.String()
+	}
+
+	countMsg := lipgloss.NewStyle().
+		Width(width).
+		Align(lipgloss.Center).
+		Render(infoStyle.Render(fmt.Sprintf("%d report(s) found", len(m.reportFiles))))
+	b.WriteString(countMsg + "\n\n")
+
+	// Show report list
+	for i, r := range m.reportFiles {
+		cursor := "  "
+		style := subtitleStyle
+		if i == m.reportIndex {
+			cursor = "> "
+			style = selectedItemStyle
+		}
+
+		// Format: name + date + PDF indicator
+		line := cursor + r.Name
+		if !r.ModTime.IsZero() {
+			line += "  " + r.ModTime.Format("02 Jan 15:04")
+		}
+		if r.PdfPath != "" {
+			line += "  [PDF]"
+		}
+
+		row := lipgloss.NewStyle().
+			Width(width).
+			Render(style.Render(line))
+		b.WriteString(row + "\n")
+	}
+
+	return b.String()
+}
+
 func (m model) renderResumeContent(width int) string {
 	var b strings.Builder
 
@@ -3075,16 +3751,10 @@ func (m model) renderDatasetDeleteConfirm(width int) string {
 	return b.String()
 }
 
-// openURL opens a URL in the default browser
+// openURL opens a URL in the default browser, running as the real user if under sudo
 func openURL(url string) tea.Cmd {
 	return func() tea.Msg {
-		var cmd *exec.Cmd
-		// Try xdg-open first (Linux), then open (macOS), then start (Windows)
-		cmd = exec.Command("xdg-open", url)
-		if err := cmd.Start(); err != nil {
-			// Fallback attempts could be added here
-			return nil
-		}
+		_ = openFileForUser(url)
 		return nil
 	}
 }
@@ -3159,6 +3829,9 @@ func (m model) startOperation() (model, tea.Cmd) {
 
 	// Create progress channel for real-time updates
 	m.progressChan = make(chan progressUpdate, 10)
+	m.datasetProgress = nil
+	m.currentDataset = -1
+	m.operationStartTime = time.Now()
 
 	// Check if resuming
 	var resumeFrom *BackupState
@@ -3239,6 +3912,19 @@ func checkPermissions() error {
 }
 
 func main() {
+	// Handle --version and --help before permission checks
+	if len(os.Args) > 1 {
+		arg := os.Args[1]
+		if arg == "--version" || arg == "-v" {
+			fmt.Println(appVersion)
+			return
+		}
+		if arg == "--help" || arg == "-h" {
+			showCLIHelp()
+			return
+		}
+	}
+
 	// Check permissions first
 	if err := checkPermissions(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -3278,6 +3964,8 @@ func handleCLI() {
 	case "--unmount", "-u":
 		fmt.Println(infoStyle.Render("Unmounting backup disk..."))
 		runUnmountSync()
+	case "--version", "-v":
+		fmt.Println(appVersion)
 	case "--help", "-h":
 		showCLIHelp()
 	default:

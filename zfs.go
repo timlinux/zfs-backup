@@ -66,7 +66,7 @@ func resolveBackupDestination(destPool, hostname, datasetSuffix string) string {
 // For example, for pool NIXROOT with datasets NIXROOT/home, NIXROOT/nix, NIXROOT/root,
 // it returns ["home", "nix", "root"]. The pool root dataset itself is excluded.
 func getChildDatasets(pool string) ([]string, error) {
-	output, err := runCommandOutput("zfs", "list", "-H", "-o", "name", "-r", pool)
+	output, err := runCommandOutput("zfs", "list", "-H", "-o", "name,mountpoint", "-r", pool)
 	if err != nil {
 		return nil, err
 	}
@@ -75,12 +75,27 @@ func getChildDatasets(pool string) ([]string, error) {
 	prefix := pool + "/"
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || line == pool {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		name := fields[0]
+		mountpoint := fields[1]
+		if name == pool {
+			continue
+		}
+		// Skip datasets with no mountpoint ("-") - these are non-mounted
+		// filesystems (e.g. application-specific datasets like atuin) that
+		// should not be synced
+		if mountpoint == "-" {
 			continue
 		}
 		// Only include direct children (not nested like pool/a/b)
-		if strings.HasPrefix(line, prefix) {
-			suffix := strings.TrimPrefix(line, prefix)
+		if strings.HasPrefix(name, prefix) {
+			suffix := strings.TrimPrefix(name, prefix)
 			if !strings.Contains(suffix, "/") {
 				datasets = append(datasets, suffix)
 			}
@@ -92,7 +107,7 @@ func getChildDatasets(pool string) ([]string, error) {
 
 // getRemoteChildDatasets returns child dataset names from a remote host via SSH.
 func getRemoteChildDatasets(sshHost, pool string) ([]string, error) {
-	output, err := runCommandOutput("ssh", sshHost, "zfs", "list", "-H", "-o", "name", "-r", pool)
+	output, err := runCommandOutput("ssh", sshHost, "zfs", "list", "-H", "-o", "name,mountpoint", "-r", pool)
 	if err != nil {
 		return nil, err
 	}
@@ -101,11 +116,24 @@ func getRemoteChildDatasets(sshHost, pool string) ([]string, error) {
 	prefix := pool + "/"
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || line == pool {
+		if line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, prefix) {
-			suffix := strings.TrimPrefix(line, prefix)
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		name := fields[0]
+		mountpoint := fields[1]
+		if name == pool {
+			continue
+		}
+		// Skip non-mounted datasets (mountpoint "-")
+		if mountpoint == "-" {
+			continue
+		}
+		if strings.HasPrefix(name, prefix) {
+			suffix := strings.TrimPrefix(name, prefix)
 			if !strings.Contains(suffix, "/") {
 				datasets = append(datasets, suffix)
 			}
@@ -115,12 +143,53 @@ func getRemoteChildDatasets(sshHost, pool string) ([]string, error) {
 	return datasets, nil
 }
 
+// DatasetSyncStatus represents the sync state of an individual dataset
+type DatasetSyncStatus int
+
+const (
+	DatasetPending  DatasetSyncStatus = iota // Not yet started
+	DatasetSyncing                           // Currently being synced
+	DatasetDone                              // Successfully synced
+	DatasetError                             // Sync failed
+	DatasetSkipped                           // Skipped (e.g. destination creation failed)
+)
+
+// SnapshotStatus represents the sync state of a single snapshot dot
+type SnapshotStatus int
+
+const (
+	SnapPending  SnapshotStatus = iota // Gray - not yet synced
+	SnapSyncing                        // Orange - currently being transferred
+	SnapDone                           // Blue - synced successfully
+	SnapError                          // Red - sync failed
+)
+
+// SnapshotDot represents one snapshot in the dot matrix
+type SnapshotDot struct {
+	Tag    string         // Snapshot tag (e.g. "2026-05-17.22h-55-Backup")
+	Status SnapshotStatus // Current sync status
+	Size   string         // Snapshot size (e.g. "1.2G", "45K")
+}
+
+// DatasetProgress tracks the sync status of a single dataset
+type DatasetProgress struct {
+	Name      string            // Dataset suffix (e.g. "home", "overflow")
+	Status    DatasetSyncStatus // Current sync status
+	ErrorMsg  string            // Error message if status is DatasetError
+	Snapshots []SnapshotDot     // Snapshots belonging to this dataset
+	Duration  time.Duration     // How long the sync took
+	Size      string            // Dataset size (from zfs list)
+}
+
 // progressUpdate is sent to update the UI during backup
 type progressUpdate struct {
 	stage       string
 	stageNum    int
 	totalStages int
 	state       *BackupState
+	// Per-dataset sync tracking (only populated during sync stage)
+	datasets       []DatasetProgress
+	currentDataset int // Index of currently syncing dataset (-1 if none)
 }
 
 // runBackup performs an incremental backup with progress updates
@@ -404,22 +473,55 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 
 		output.WriteString(fmt.Sprintf("Found %d dataset(s) to sync: %s\n\n", len(datasets), strings.Join(datasets, ", ")))
 
+		// Initialize per-dataset progress with snapshot discovery and sizes
+		dsProgress := initDatasetProgress(datasets)
+		for i, ds := range datasets {
+			fullDS := fmt.Sprintf("%s/%s", sourcePool, ds)
+			snapInfos := getSnapshotsForDataset(fullDS)
+			dsProgress[i].Snapshots = makeSnapshotDots(snapInfos, SnapPending)
+			dsProgress[i].Size = getDatasetSize(fullDS)
+		}
+		sendDatasetProgress(progressChan, "Syncing data to backup disk", currentStage-1, totalStages, state, dsProgress, -1)
+
 		for i, ds := range datasets {
 			syncDest := resolveBackupDestination(destPool, hostname, ds)
 			syncSrc := fmt.Sprintf("%s/%s", sourcePool, ds)
+			dsStart := time.Now()
 
 			output.WriteString(fmt.Sprintf("[Dataset %d/%d] %s -> %s\n", i+1, len(datasets), syncSrc, syncDest))
 
-			// Check for existing zfs receive process and wait for it
+			dsProgress[i].Status = DatasetSyncing
+			setAllSnapshotStatus(dsProgress[i].Snapshots, SnapSyncing)
+			sendDatasetProgress(progressChan, fmt.Sprintf("Syncing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
+
+			if err := ensureDatasetExists(ctx, syncDest); err != nil {
+				dsProgress[i].Status = DatasetSkipped
+				dsProgress[i].ErrorMsg = fmt.Sprintf("create failed: %v", err)
+				dsProgress[i].Duration = time.Since(dsStart)
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
+				sendDatasetProgress(progressChan, "Syncing data to backup disk", currentStage-1, totalStages, state, dsProgress, i)
+				continue
+			}
+
 			if err := waitForZFSReceive(ctx, syncDest, &output); err != nil {
+				dsProgress[i].Status = DatasetError
+				dsProgress[i].ErrorMsg = err.Error()
+				dsProgress[i].Duration = time.Since(dsStart)
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
+				sendDatasetProgress(progressChan, "Syncing data to backup disk", currentStage-1, totalStages, state, dsProgress, i)
 				return fmt.Errorf("error waiting for existing receive on %s: %w", ds, err)
 			}
 
-			if err := runCommandWithContext(ctx, "syncoid", "--create-bookmark", syncSrc, syncDest); err != nil {
-				output.WriteString(fmt.Sprintf("Warning: syncoid failed for %s: %v (continuing...)\n", ds, err))
+			if err := runSyncoidWithTimeout(ctx, syncoidTimeout, "--create-bookmark", syncSrc, syncDest); err != nil {
+				dsProgress[i].Status = DatasetError
+				dsProgress[i].ErrorMsg = err.Error()
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
 			} else {
-				output.WriteString(fmt.Sprintf("[OK] %s synced successfully\n", ds))
+				dsProgress[i].Status = DatasetDone
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapDone)
 			}
+			dsProgress[i].Duration = time.Since(dsStart)
+			sendDatasetProgress(progressChan, "Syncing data to backup disk", currentStage-1, totalStages, state, dsProgress, i)
 		}
 		return nil
 	})
@@ -671,21 +773,52 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 
 		output.WriteString(fmt.Sprintf("Found %d dataset(s) to force sync: %s\n\n", len(datasets), strings.Join(datasets, ", ")))
 
+		dsProgress := initDatasetProgress(datasets)
+		for i, ds := range datasets {
+			fullDS := fmt.Sprintf("%s/%s", sourcePool, ds)
+			snapInfos := getSnapshotsForDataset(fullDS)
+			dsProgress[i].Snapshots = makeSnapshotDots(snapInfos, SnapPending)
+			dsProgress[i].Size = getDatasetSize(fullDS)
+		}
+		sendDatasetProgress(progressChan, "Force syncing to backup disk", currentStage-1, totalStages, state, dsProgress, -1)
+
 		for i, ds := range datasets {
 			syncDest := resolveBackupDestination(destPool, hostname, ds)
 			syncSrc := fmt.Sprintf("%s/%s", sourcePool, ds)
+			dsStart := time.Now()
 
-			output.WriteString(fmt.Sprintf("[Dataset %d/%d] %s -> %s\n", i+1, len(datasets), syncSrc, syncDest))
+			dsProgress[i].Status = DatasetSyncing
+			setAllSnapshotStatus(dsProgress[i].Snapshots, SnapSyncing)
+			sendDatasetProgress(progressChan, fmt.Sprintf("Force syncing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
+
+			if err := ensureDatasetExists(ctx, syncDest); err != nil {
+				dsProgress[i].Status = DatasetSkipped
+				dsProgress[i].ErrorMsg = fmt.Sprintf("create failed: %v", err)
+				dsProgress[i].Duration = time.Since(dsStart)
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
+				sendDatasetProgress(progressChan, "Force syncing to backup disk", currentStage-1, totalStages, state, dsProgress, i)
+				continue
+			}
 
 			if err := waitForZFSReceive(ctx, syncDest, &output); err != nil {
+				dsProgress[i].Status = DatasetError
+				dsProgress[i].ErrorMsg = err.Error()
+				dsProgress[i].Duration = time.Since(dsStart)
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
+				sendDatasetProgress(progressChan, "Force syncing to backup disk", currentStage-1, totalStages, state, dsProgress, i)
 				return fmt.Errorf("error waiting for existing receive on %s: %w", ds, err)
 			}
 
-			if err := runCommandWithContext(ctx, "syncoid", "--force-delete", syncSrc, syncDest); err != nil {
-				output.WriteString(fmt.Sprintf("Warning: syncoid failed for %s: %v (continuing...)\n", ds, err))
+			if err := runSyncoidWithTimeout(ctx, syncoidTimeout, "--force-delete", syncSrc, syncDest); err != nil {
+				dsProgress[i].Status = DatasetError
+				dsProgress[i].ErrorMsg = err.Error()
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
 			} else {
-				output.WriteString(fmt.Sprintf("[OK] %s force synced successfully\n", ds))
+				dsProgress[i].Status = DatasetDone
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapDone)
 			}
+			dsProgress[i].Duration = time.Since(dsStart)
+			sendDatasetProgress(progressChan, "Force syncing to backup disk", currentStage-1, totalStages, state, dsProgress, i)
 		}
 		return nil
 	})
@@ -1249,27 +1382,64 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 
 		output.WriteString(fmt.Sprintf("Syncing %d dataset(s) from %s\n\n", len(datasetsToSync), remoteHost))
 
+		// Extract display names for dataset progress
+		dsNames := make([]string, len(datasetsToSync))
 		for i, ds := range datasetsToSync {
-			// Extract suffix for destination path
-			suffix := ds
+			dsNames[i] = ds
 			if idx := strings.Index(ds, "/"); idx >= 0 {
-				suffix = ds[idx+1:]
+				dsNames[i] = ds[idx+1:]
 			}
+		}
+		dsProgress := initDatasetProgress(dsNames)
+		for i, ds := range datasetsToSync {
+			snapInfos := getRemoteSnapshotsForDataset(remoteHost, ds)
+			dsProgress[i].Snapshots = makeSnapshotDots(snapInfos, SnapPending)
+			// For remote, get size from remote host
+			sizeOut, sizeErr := runCommandOutput("ssh", remoteHost, "zfs", "list", "-H", "-o", "used", ds)
+			if sizeErr == nil {
+				dsProgress[i].Size = strings.TrimSpace(sizeOut)
+			}
+		}
+		sendDatasetProgress(progressChan, "Syncing data from remote host", currentStage-1, totalStages, state, dsProgress, -1)
 
+		for i, ds := range datasetsToSync {
+			suffix := dsNames[i]
 			syncDest := getHostnameDatasetPath(destPool, hostname, suffix)
 			syncSrc := fmt.Sprintf("%s:%s", remoteHost, ds)
+			dsStart := time.Now()
 
-			output.WriteString(fmt.Sprintf("[Dataset %d/%d] %s -> %s\n", i+1, len(datasetsToSync), syncSrc, syncDest))
+			dsProgress[i].Status = DatasetSyncing
+			setAllSnapshotStatus(dsProgress[i].Snapshots, SnapSyncing)
+			sendDatasetProgress(progressChan, fmt.Sprintf("Syncing %s", suffix), currentStage-1, totalStages, state, dsProgress, i)
+
+			if err := ensureDatasetExists(ctx, syncDest); err != nil {
+				dsProgress[i].Status = DatasetSkipped
+				dsProgress[i].ErrorMsg = fmt.Sprintf("create failed: %v", err)
+				dsProgress[i].Duration = time.Since(dsStart)
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
+				sendDatasetProgress(progressChan, "Syncing data from remote host", currentStage-1, totalStages, state, dsProgress, i)
+				continue
+			}
 
 			if err := waitForZFSReceive(ctx, syncDest, &output); err != nil {
+				dsProgress[i].Status = DatasetError
+				dsProgress[i].ErrorMsg = err.Error()
+				dsProgress[i].Duration = time.Since(dsStart)
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
+				sendDatasetProgress(progressChan, "Syncing data from remote host", currentStage-1, totalStages, state, dsProgress, i)
 				return fmt.Errorf("error waiting for existing receive on %s: %w", ds, err)
 			}
 
-			if err := runCommandWithContext(ctx, "syncoid", "--create-bookmark", syncSrc, syncDest); err != nil {
-				output.WriteString(fmt.Sprintf("Warning: syncoid failed for %s: %v (continuing...)\n", ds, err))
+			if err := runSyncoidWithTimeout(ctx, syncoidTimeout, "--create-bookmark", syncSrc, syncDest); err != nil {
+				dsProgress[i].Status = DatasetError
+				dsProgress[i].ErrorMsg = err.Error()
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
 			} else {
-				output.WriteString(fmt.Sprintf("[OK] %s synced successfully\n", ds))
+				dsProgress[i].Status = DatasetDone
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapDone)
 			}
+			dsProgress[i].Duration = time.Since(dsStart)
+			sendDatasetProgress(progressChan, "Syncing data from remote host", currentStage-1, totalStages, state, dsProgress, i)
 		}
 		return nil
 	})
@@ -1429,18 +1599,44 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 
 		output.WriteString(fmt.Sprintf("Pushing %d dataset(s) to %s\n\n", len(datasets), remoteHost))
 
+		dsProgress := initDatasetProgress(datasets)
+		for i, ds := range datasets {
+			fullDS := fmt.Sprintf("%s/%s", sourcePool, ds)
+			snapInfos := getSnapshotsForDataset(fullDS)
+			dsProgress[i].Snapshots = makeSnapshotDots(snapInfos, SnapPending)
+			dsProgress[i].Size = getDatasetSize(fullDS)
+		}
+		sendDatasetProgress(progressChan, "Pushing data to remote host", currentStage-1, totalStages, state, dsProgress, -1)
+
 		for i, ds := range datasets {
 			syncSrc := fmt.Sprintf("%s/%s", sourcePool, ds)
-			// Push to remote: syncoid local_src user@host:DESTPOOL/hostname/dataset
-			remoteDest := fmt.Sprintf("%s:%s/%s/%s", remoteHost, remoteDestPool, hostname, ds)
+			remoteDatasetPath := fmt.Sprintf("%s/%s/%s", remoteDestPool, hostname, ds)
+			remoteDest := fmt.Sprintf("%s:%s", remoteHost, remoteDatasetPath)
+			dsStart := time.Now()
 
-			output.WriteString(fmt.Sprintf("[Dataset %d/%d] %s -> %s\n", i+1, len(datasets), syncSrc, remoteDest))
+			dsProgress[i].Status = DatasetSyncing
+			setAllSnapshotStatus(dsProgress[i].Snapshots, SnapSyncing)
+			sendDatasetProgress(progressChan, fmt.Sprintf("Pushing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 
-			if err := runCommandWithContext(ctx, "syncoid", "--create-bookmark", syncSrc, remoteDest); err != nil {
-				output.WriteString(fmt.Sprintf("Warning: syncoid failed for %s: %v (continuing...)\n", ds, err))
-			} else {
-				output.WriteString(fmt.Sprintf("[OK] %s pushed successfully\n", ds))
+			if err := ensureRemoteDatasetExists(ctx, remoteHost, remoteDatasetPath); err != nil {
+				dsProgress[i].Status = DatasetSkipped
+				dsProgress[i].ErrorMsg = fmt.Sprintf("create failed: %v", err)
+				dsProgress[i].Duration = time.Since(dsStart)
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
+				sendDatasetProgress(progressChan, "Pushing data to remote host", currentStage-1, totalStages, state, dsProgress, i)
+				continue
 			}
+
+			if err := runSyncoidWithTimeout(ctx, syncoidTimeout, "--create-bookmark", syncSrc, remoteDest); err != nil {
+				dsProgress[i].Status = DatasetError
+				dsProgress[i].ErrorMsg = err.Error()
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
+			} else {
+				dsProgress[i].Status = DatasetDone
+				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapDone)
+			}
+			dsProgress[i].Duration = time.Since(dsStart)
+			sendDatasetProgress(progressChan, "Pushing data to remote host", currentStage-1, totalStages, state, dsProgress, i)
 		}
 		return nil
 	})
@@ -1584,6 +1780,140 @@ func isZFSReceiveRunning(dataset string) (bool, int, error) {
 	}
 
 	return false, 0, nil
+}
+
+// snapshotInfo holds a snapshot tag and its size
+type snapshotInfo struct {
+	Tag  string
+	Size string
+}
+
+// getSnapshotsForDataset returns snapshot tags and sizes for a given dataset
+func getSnapshotsForDataset(dataset string) []snapshotInfo {
+	output, err := runCommandOutput("zfs", "list", "-H", "-o", "name,used", "-t", "snapshot", "-s", "creation", dataset)
+	if err != nil {
+		return nil
+	}
+	return parseSnapshotList(output)
+}
+
+// getRemoteSnapshotsForDataset returns snapshot tags and sizes from a remote host
+func getRemoteSnapshotsForDataset(sshHost, dataset string) []snapshotInfo {
+	output, err := runCommandOutput("ssh", sshHost, "zfs", "list", "-H", "-o", "name,used", "-t", "snapshot", "-s", "creation", dataset)
+	if err != nil {
+		return nil
+	}
+	return parseSnapshotList(output)
+}
+
+// parseSnapshotList parses "name\tused" lines into snapshotInfo entries
+func parseSnapshotList(output string) []snapshotInfo {
+	var snaps []snapshotInfo
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 1 {
+			continue
+		}
+		nameParts := strings.SplitN(fields[0], "@", 2)
+		if len(nameParts) != 2 {
+			continue
+		}
+		size := ""
+		if len(fields) >= 2 {
+			size = fields[1]
+		}
+		snaps = append(snaps, snapshotInfo{Tag: nameParts[1], Size: size})
+	}
+	return snaps
+}
+
+// makeSnapshotDots creates a slice of SnapshotDot from snapshot info with the given status
+func makeSnapshotDots(snaps []snapshotInfo, status SnapshotStatus) []SnapshotDot {
+	dots := make([]SnapshotDot, len(snaps))
+	for i, s := range snaps {
+		dots[i] = SnapshotDot{Tag: s.Tag, Size: s.Size, Status: status}
+	}
+	return dots
+}
+
+// setAllSnapshotStatus sets all snapshot dots to the given status
+func setAllSnapshotStatus(dots []SnapshotDot, status SnapshotStatus) {
+	for i := range dots {
+		dots[i].Status = status
+	}
+}
+
+// getDatasetSize returns the "used" size of a dataset as a human-readable string
+func getDatasetSize(dataset string) string {
+	output, err := runCommandOutput("zfs", "list", "-H", "-o", "used", dataset)
+	if err != nil {
+		return "?"
+	}
+	return strings.TrimSpace(output)
+}
+
+// sendDatasetProgress sends a dataset-level progress update to the UI channel
+func sendDatasetProgress(progressChan chan<- progressUpdate, stage string, stageNum, totalStages int, state *BackupState, datasets []DatasetProgress, currentIdx int) {
+	if progressChan == nil {
+		return
+	}
+	// Make a copy of datasets slice to avoid races
+	dsCopy := make([]DatasetProgress, len(datasets))
+	copy(dsCopy, datasets)
+	progressChan <- progressUpdate{
+		stage:          stage,
+		stageNum:       stageNum,
+		totalStages:    totalStages,
+		state:          state,
+		datasets:       dsCopy,
+		currentDataset: currentIdx,
+	}
+}
+
+// initDatasetProgress creates a slice of DatasetProgress in pending state
+func initDatasetProgress(names []string) []DatasetProgress {
+	dp := make([]DatasetProgress, len(names))
+	for i, name := range names {
+		dp[i] = DatasetProgress{Name: name, Status: DatasetPending}
+	}
+	return dp
+}
+
+// ensureDatasetExists creates a ZFS dataset (and parents) if it doesn't already exist.
+// This prevents syncoid/zfs receive from hanging when the destination doesn't exist.
+func ensureDatasetExists(ctx context.Context, dataset string) error {
+	if _, err := runCommandOutput("zfs", "list", "-H", dataset); err == nil {
+		return nil // already exists
+	}
+	return runCommandWithContext(ctx, "zfs", "create", "-p", dataset)
+}
+
+// ensureRemoteDatasetExists creates a ZFS dataset on a remote host via SSH if it doesn't exist.
+func ensureRemoteDatasetExists(ctx context.Context, sshHost, dataset string) error {
+	if _, err := runCommandOutput("ssh", sshHost, "zfs", "list", "-H", dataset); err == nil {
+		return nil // already exists
+	}
+	return runCommandWithContext(ctx, "ssh", sshHost, "zfs", "create", "-p", dataset)
+}
+
+// syncoidTimeout is the maximum time allowed for a single syncoid dataset sync.
+// If exceeded, the sync is cancelled and the backup continues with the next dataset.
+const syncoidTimeout = 4 * time.Hour
+
+// runSyncoidWithTimeout runs syncoid with a per-dataset timeout to prevent infinite hangs.
+func runSyncoidWithTimeout(ctx context.Context, timeout time.Duration, args ...string) error {
+	syncCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	err := runCommandWithContext(syncCtx, "syncoid", args...)
+	if err != nil && syncCtx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("syncoid timed out after %v", timeout)
+	}
+	return err
 }
 
 // waitForZFSReceive waits for an existing zfs receive process to complete
