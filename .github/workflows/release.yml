@@ -9,8 +9,28 @@ permissions:
   contents: write
 
 jobs:
+  version-check:
+    name: Verify version matches tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check version consistency
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          FILE_VERSION=$(cat VERSION | tr -d '\n')
+          echo "Git tag version:  $TAG"
+          echo "VERSION file:     $FILE_VERSION"
+          if [ "$TAG" != "$FILE_VERSION" ]; then
+            echo "::error::Tag v$TAG does not match VERSION file \"$FILE_VERSION\". Update the VERSION file before tagging."
+            exit 1
+          fi
+          echo "Versions match."
+
   build:
     name: Build binaries
+    needs: version-check
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -44,7 +64,8 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
         run: |
-          go build -ldflags="-s -w" -o zfs-backup-${{ matrix.suffix }} .
+          VERSION=$(cat VERSION | tr -d '\n')
+          go build -ldflags="-s -w -X main.appVersion=${VERSION}" -o zfs-backup-${{ matrix.suffix }} .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

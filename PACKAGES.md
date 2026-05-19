@@ -46,6 +46,8 @@ This document provides an annotated list of all packages in the software archite
 | zfsutils | ZFS filesystem utilities (zfs, zpool commands) | NixOS/system package |
 | sanoid | syncoid tool for efficient ZFS send/receive | NixOS/system package |
 | udisks2 | USB drive power management (udisksctl) | NixOS/system package |
+| pandoc | Markdown to PDF conversion for backup reports | NixOS/system package |
+| texliveSmall | LaTeX engine (xelatex) for pandoc PDF output | NixOS/system package |
 | coreutils | Basic utilities (cp, mkdir) | NixOS/system package |
 
 ## Nix Packages

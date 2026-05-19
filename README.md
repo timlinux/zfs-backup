@@ -10,14 +10,96 @@ A beautiful TUI (Terminal User Interface) for managing ZFS backups, built with [
 
 ## Features
 
-- **Incremental Backups** - Efficient snapshots with syncoid integration
+- **Incremental Backups** - Efficient snapshots of ALL datasets with syncoid integration
+- **Multi-Host Backups** - Back up multiple machines to the same drive with hostname namespacing
+- **Pull Remote Backup** - Pull ZFS snapshots from remote servers via SSH
+- **Push Backup to Remote** - Push local snapshots to a remote backup server via SSH
 - **Force Backup** - Destructive backup option for out-of-sync scenarios
 - **Restore Files** - Dual-panel file explorer to browse snapshots and restore files
 - **Pool Information** - View detailed pool structure, health, datasets, and snapshots
 - **Pool Maintenance** - Start, stop, and monitor scrub operations
 - **Device Preparation** - Create encrypted ZFS pools with AES-256-GCM
 - **Safe Unmounting** - Properly export pools and power off USB drives
+- **Smart Pool Defaults** - Auto-detects source/destination pools based on naming
+- **Saved Host Profiles** - Remote hosts are persisted for quick reuse
 - **CLI Mode** - Command-line arguments for automation and scripting
+
+## Backup Modalities
+
+### Local Backup (to external USB drive)
+
+```mermaid
+graph LR
+    subgraph "Local Machine"
+        A[NIXROOT/home]
+        B[NIXROOT/nix]
+        C[NIXROOT/root]
+    end
+    subgraph "USB Backup Drive"
+        D[NIXBACKUPS/abyss/home]
+        E[NIXBACKUPS/abyss/nix]
+        F[NIXBACKUPS/abyss/root]
+    end
+    A -->|syncoid| D
+    B -->|syncoid| E
+    C -->|syncoid| F
+```
+
+### Pull Remote Backup (remote server to local drive)
+
+```mermaid
+graph LR
+    subgraph "Remote Server (myserver)"
+        A[NIXROOT/home]
+        B[NIXROOT/nix]
+    end
+    subgraph "Local USB Backup Drive"
+        D[NIXBACKUPS/myserver/home]
+        E[NIXBACKUPS/myserver/nix]
+    end
+    A -->|"syncoid (SSH pull)"| D
+    B -->|"syncoid (SSH pull)"| E
+```
+
+### Push Backup (local to remote backup server)
+
+```mermaid
+graph LR
+    subgraph "Local Machine"
+        A[NIXROOT/home]
+        B[NIXROOT/nix]
+    end
+    subgraph "Remote Backup Server"
+        D[NIXBACKUPS/abyss/home]
+        E[NIXBACKUPS/abyss/nix]
+    end
+    A -->|"syncoid (SSH push)"| D
+    B -->|"syncoid (SSH push)"| E
+```
+
+### Multi-Host on Same Drive
+
+```mermaid
+graph TB
+    subgraph "USB Backup Drive (NIXBACKUPS)"
+        subgraph "abyss (laptop)"
+            A1[home]
+            A2[nix]
+            A3[root]
+        end
+        subgraph "myserver (remote)"
+            B1[home]
+            B2[nix]
+            B3[data]
+        end
+        subgraph "workstation (remote)"
+            C1[home]
+            C2[projects]
+        end
+    end
+```
+
+All datasets are namespaced by hostname, allowing multiple machines to share one backup drive without conflicts. Backward-compatible with existing flat `NIXBACKUPS/home` layouts.
 
 ## Quick Start
 
@@ -58,10 +140,13 @@ sudo zfs-backup --help        # Show help
 
 | Option | Description |
 |--------|-------------|
-| Backup ZFS (incremental) | Run efficient incremental backup using syncoid |
+| Backup ZFS (incremental) | Run efficient incremental backup of all local datasets |
+| Pull Remote Backup | Pull backup from a remote host via SSH |
+| Push Backup to Remote | Push local snapshots to a remote backup server |
 | Restore Files | Browse snapshots and restore individual files |
 | Show zpool info | View pool structure, health, datasets, and snapshots |
 | Pool Maintenance | Start/stop scrubs, monitor pool health |
+| Recover Failed Backup | Fix broken sync state after interruption |
 | Unmount Backup Disk | Safely export pool and power off USB drive |
 | Prepare Backup Device | Create new encrypted ZFS pool on external drive |
 | Force Backup (destructive) | Reset backup when incremental chain is broken |

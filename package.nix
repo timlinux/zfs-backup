@@ -9,7 +9,7 @@
 
 buildGoModule rec {
   pname = "zfs-backup";
-  version = "1.0.0";
+  version = builtins.replaceStrings ["\n"] [""] (builtins.readFile ./VERSION);
 
   src = ./.;
 
@@ -22,7 +22,7 @@ buildGoModule rec {
     udisks2
   ];
 
-  # Ensure runtime dependencies are in PATH
+  # Ensure runtime dependencies are in PATH (pandoc/texlive optional for PDF reports)
   postInstall = ''
     wrapProgram $out/bin/zfs-backup \
       --prefix PATH : ${
@@ -39,7 +39,7 @@ buildGoModule rec {
   ldflags = [
     "-s"
     "-w"
-    "-X main.version=${version}"
+    "-X main.appVersion=${version}"
   ];
 
   meta = with lib; {
