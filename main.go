@@ -2002,6 +2002,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			DatasetProgress: m.datasetProgress,
 			Success:         msg.err == nil,
 			OperationLog:    msg.message,
+			SourceInventory: collectPoolInventory(m.sourcePool),
+			DestInventory:   collectPoolInventory(m.destPool),
 		}
 		if msg.err != nil {
 			reportInfo.ErrorMessage = msg.err.Error()
