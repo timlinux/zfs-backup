@@ -1,0 +1,53 @@
+/* Kartoza Brand Colors */
+:root {
+  --kartoza-gold: #DF9E2F;
+  --kartoza-blue: #569FC6;
+  --kartoza-gray: #8A8B8B;
+  --kartoza-teal: #06969A;
+  --kartoza-red: #CC0403;
+}
+
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #DF9E2F;
+  --md-primary-fg-color--light: #E8B45A;
+  --md-primary-fg-color--dark: #C88A1F;
+  --md-accent-fg-color: #569FC6;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #DF9E2F;
+  --md-primary-fg-color--light: #E8B45A;
+  --md-primary-fg-color--dark: #C88A1F;
+  --md-accent-fg-color: #569FC6;
+}
+
+/* Footer styling */
+.md-footer {
+  background-color: #1E1E1E;
+}
+
+.md-footer-meta {
+  background-color: #1E1E1E;
+}
+
+/* Code block styling */
+.highlight code {
+  border-radius: 4px;
+}
+
+/* Admonition styling */
+.admonition.warning {
+  border-color: var(--kartoza-gold);
+}
+
+.admonition.danger {
+  border-color: var(--kartoza-red);
+}
+
+.admonition.tip {
+  border-color: var(--kartoza-teal);
+}
+
+.admonition.info {
+  border-color: var(--kartoza-blue);
+}
