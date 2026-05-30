@@ -250,7 +250,10 @@ stateDiagram-v2
 - Report written to markdown and PDF at end of each backup
 - Reports saved to ~/.local/share/zfs-backup/reports/
 - Filename: {Operation}-{Source}-to-{Dest}-{DDMonYYYY}-{HHhMM}-Report.{md,pdf}
-- PDF generated via pandoc (graceful fallback if unavailable)
+- PDF generated natively using go-pdf/fpdf (no external dependencies)
+- Both reports contain all sections: narrative summary, technical summary, dataset sync results table, backup tree, pool inventory (source and destination), operation log, and next steps
+- Pool inventory includes: pool usage (zpool list -v), dataset table (name, used, available, refer, mountpoint, quota, compression), pool status (zpool status), and snapshot listing
+- PDF and markdown reports are feature-equivalent
 
 ### US-014: Saved Host Profiles
 **As a** user
@@ -446,6 +449,7 @@ Support command-line flags for automation:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.5.0 | 2026-05 | Comprehensive PDF and markdown reports with full pool inventory (datasets, sizes, quotas, compression, snapshots), narrative summary, operation log, and next steps |
 | 1.3.0 | 2026-05 | Added pull/push remote backup via SSH; multi-host support with hostname namespacing; all-dataset backup; smart pool defaults; saved host profiles; fixed force backup flow |
 | 1.2.0 | 2026-03 | Added "Pool Maintenance" with scrub control; fixed pool import/unlock flow; scrollable result reports |
 | 1.1.0 | 2026 | Added "Show zpool info" feature; simplified UI by removing emojis |

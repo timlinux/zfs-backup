@@ -11,6 +11,26 @@ import (
 	"github.com/go-pdf/fpdf"
 )
 
+// PoolInventoryDataset holds ZFS dataset properties for reporting
+type PoolInventoryDataset struct {
+	Name       string
+	Used       string
+	Available  string
+	Refer      string
+	Mountpoint string
+	Quota      string
+	Compress   string
+}
+
+// PoolInventory holds pool and dataset information for the report
+type PoolInventory struct {
+	PoolName    string
+	StatusText  string // Raw output from zpool status
+	UsageText   string // Raw output from zpool list -v
+	Datasets    []PoolInventoryDataset
+	SnapshotText string // Raw output from zfs list -t snapshot
+}
+
 // ReportInfo holds the context needed to generate a backup report
 type ReportInfo struct {
 	Operation       string // "backup", "force-backup", "remote-backup", "push-backup"
@@ -23,6 +43,8 @@ type ReportInfo struct {
 	Success         bool
 	ErrorMessage    string
 	OperationLog    string // The raw output from the backup operation
+	SourceInventory *PoolInventory
+	DestInventory   *PoolInventory
 }
 
 // getRealUserHome returns the home directory of the real user, even when running
@@ -291,6 +313,10 @@ func generateMarkdownReport(info ReportInfo) string {
 		b.WriteString(fmt.Sprintf("```\n%s\n```\n\n", info.ErrorMessage))
 	}
 
+	// Pool Inventory sections
+	writeMarkdownPoolInventory(&b, info.SourceInventory, "Source Pool")
+	writeMarkdownPoolInventory(&b, info.DestInventory, "Destination Pool")
+
 	// Operation log
 	if info.OperationLog != "" {
 		b.WriteString("## Operation Log\n\n")
@@ -399,6 +425,118 @@ func writeNarrativeSummary(info ReportInfo, totalDuration time.Duration) string 
 	return b.String()
 }
 
+// writeMarkdownPoolInventory writes a pool inventory section to the markdown report
+func writeMarkdownPoolInventory(b *strings.Builder, inv *PoolInventory, label string) {
+	if inv == nil {
+		return
+	}
+
+	b.WriteString(fmt.Sprintf("## %s: %s\n\n", label, inv.PoolName))
+
+	if inv.UsageText != "" {
+		b.WriteString("### Pool Usage\n\n")
+		b.WriteString("```\n")
+		b.WriteString(inv.UsageText)
+		b.WriteString("\n```\n\n")
+	}
+
+	if len(inv.Datasets) > 0 {
+		b.WriteString("### Datasets\n\n")
+		b.WriteString("| Name | Used | Available | Refer | Quota | Compression | Mountpoint |\n")
+		b.WriteString("|------|------|-----------|-------|-------|-------------|------------|\n")
+		for _, ds := range inv.Datasets {
+			quota := ds.Quota
+			if quota == "" || quota == "none" {
+				quota = "-"
+			}
+			compress := ds.Compress
+			if compress == "" {
+				compress = "-"
+			}
+			b.WriteString(fmt.Sprintf("| `%s` | %s | %s | %s | %s | %s | `%s` |\n",
+				ds.Name, ds.Used, ds.Available, ds.Refer, quota, compress, ds.Mountpoint))
+		}
+		b.WriteString("\n")
+	}
+
+	if inv.StatusText != "" {
+		b.WriteString("### Pool Status\n\n")
+		b.WriteString("<details><summary>Click to expand</summary>\n\n")
+		b.WriteString("```\n")
+		b.WriteString(inv.StatusText)
+		b.WriteString("\n```\n\n")
+		b.WriteString("</details>\n\n")
+	}
+
+	if inv.SnapshotText != "" {
+		b.WriteString("### Snapshots\n\n")
+		b.WriteString("<details><summary>Click to expand</summary>\n\n")
+		b.WriteString("```\n")
+		b.WriteString(inv.SnapshotText)
+		b.WriteString("\n```\n\n")
+		b.WriteString("</details>\n\n")
+	}
+}
+
+// collectPoolInventory gathers pool status, datasets, and snapshots for a given pool.
+// Returns nil if the pool cannot be queried (e.g. not imported).
+func collectPoolInventory(pool string) *PoolInventory {
+	if pool == "" {
+		return nil
+	}
+	inv := &PoolInventory{PoolName: pool}
+
+	// Pool status
+	if out, err := exec.Command("zpool", "status", pool).Output(); err == nil {
+		inv.StatusText = strings.TrimSpace(string(out))
+	}
+
+	// Pool usage
+	if out, err := exec.Command("zpool", "list", "-v", pool).Output(); err == nil {
+		inv.UsageText = strings.TrimSpace(string(out))
+	}
+
+	// Datasets with properties
+	if out, err := exec.Command("zfs", "list", "-r", "-o", "name,used,avail,refer,mountpoint,quota,compression", pool).Output(); err == nil {
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		for i, line := range lines {
+			if i == 0 { // skip header
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) >= 7 {
+				inv.Datasets = append(inv.Datasets, PoolInventoryDataset{
+					Name:       fields[0],
+					Used:       fields[1],
+					Available:  fields[2],
+					Refer:      fields[3],
+					Mountpoint: fields[4],
+					Quota:      fields[5],
+					Compress:   fields[6],
+				})
+			} else if len(fields) >= 5 {
+				inv.Datasets = append(inv.Datasets, PoolInventoryDataset{
+					Name:       fields[0],
+					Used:       fields[1],
+					Available:  fields[2],
+					Refer:      fields[3],
+					Mountpoint: fields[4],
+				})
+			}
+		}
+	}
+
+	// Snapshots
+	if out, err := exec.Command("zfs", "list", "-r", "-t", "snapshot", "-o", "name,used,refer,creation", pool).Output(); err == nil {
+		text := strings.TrimSpace(string(out))
+		if text != "" {
+			inv.SnapshotText = text
+		}
+	}
+
+	return inv
+}
+
 // writeBackupReport writes the report as markdown and attempts PDF conversion.
 // Returns the paths to the generated files and any error.
 func writeBackupReport(info ReportInfo) (mdPath, pdfPath string, err error) {
@@ -458,6 +596,126 @@ func openFileForUser(path string) error {
 	return exec.Command("xdg-open", path).Start()
 }
 
+// pdfSectionHeader renders a section heading with an underline
+func pdfSectionHeader(pdf *fpdf.Fpdf, dark, gray [3]int, title string) {
+	pdf.SetFont("Helvetica", "B", 12)
+	pdf.SetTextColor(dark[0], dark[1], dark[2])
+	pdf.CellFormat(0, 8, title, "", 1, "L", false, 0, "")
+	pdf.SetDrawColor(gray[0], gray[1], gray[2])
+	pdf.Line(15, pdf.GetY(), 195, pdf.GetY())
+	pdf.Ln(2)
+}
+
+// pdfPoolInventorySection renders a pool inventory section in the PDF
+func pdfPoolInventorySection(pdf *fpdf.Fpdf, inv *PoolInventory, label string, dark, gray, teal [3]int) {
+	if inv == nil {
+		return
+	}
+
+	pdfSectionHeader(pdf, dark, gray, fmt.Sprintf("%s: %s", label, inv.PoolName))
+
+	// Pool usage summary
+	if inv.UsageText != "" {
+		pdf.SetFont("Helvetica", "B", 9)
+		pdf.SetTextColor(teal[0], teal[1], teal[2])
+		pdf.CellFormat(0, 5, "Pool Usage", "", 1, "L", false, 0, "")
+		pdf.Ln(1)
+		pdf.SetFont("Courier", "", 6.5)
+		pdf.SetTextColor(dark[0], dark[1], dark[2])
+		for _, line := range strings.Split(inv.UsageText, "\n") {
+			pdf.CellFormat(0, 3, line, "", 1, "L", false, 0, "")
+		}
+		pdf.Ln(3)
+	}
+
+	// Datasets table
+	if len(inv.Datasets) > 0 {
+		pdf.SetFont("Helvetica", "B", 9)
+		pdf.SetTextColor(teal[0], teal[1], teal[2])
+		pdf.CellFormat(0, 5, "Datasets", "", 1, "L", false, 0, "")
+		pdf.Ln(1)
+
+		colWidths := []float64{50, 18, 18, 18, 18, 18, 22}
+		headers := []string{"Name", "Used", "Avail", "Refer", "Quota", "Compress", "Mountpoint"}
+
+		pdf.SetFont("Helvetica", "B", 7)
+		pdf.SetFillColor(dark[0], dark[1], dark[2])
+		pdf.SetTextColor(255, 255, 255)
+		for i, h := range headers {
+			pdf.CellFormat(colWidths[i], 5, h, "1", 0, "C", true, 0, "")
+		}
+		pdf.Ln(-1)
+
+		pdf.SetFont("Helvetica", "", 7)
+		pdf.SetTextColor(dark[0], dark[1], dark[2])
+		for ri, ds := range inv.Datasets {
+			// Alternate row shading
+			if ri%2 == 0 {
+				pdf.SetFillColor(245, 245, 245)
+			} else {
+				pdf.SetFillColor(255, 255, 255)
+			}
+			fill := true
+
+			// Truncate long names
+			name := ds.Name
+			if len(name) > 30 {
+				name = "..." + name[len(name)-27:]
+			}
+			quota := ds.Quota
+			if quota == "" || quota == "none" {
+				quota = "-"
+			}
+			compress := ds.Compress
+			if compress == "" {
+				compress = "-"
+			}
+			mp := ds.Mountpoint
+			if len(mp) > 14 {
+				mp = "..." + mp[len(mp)-11:]
+			}
+
+			pdf.CellFormat(colWidths[0], 4.5, name, "1", 0, "L", fill, 0, "")
+			pdf.CellFormat(colWidths[1], 4.5, ds.Used, "1", 0, "R", fill, 0, "")
+			pdf.CellFormat(colWidths[2], 4.5, ds.Available, "1", 0, "R", fill, 0, "")
+			pdf.CellFormat(colWidths[3], 4.5, ds.Refer, "1", 0, "R", fill, 0, "")
+			pdf.CellFormat(colWidths[4], 4.5, quota, "1", 0, "R", fill, 0, "")
+			pdf.CellFormat(colWidths[5], 4.5, compress, "1", 0, "C", fill, 0, "")
+			pdf.CellFormat(colWidths[6], 4.5, mp, "1", 0, "L", fill, 0, "")
+			pdf.Ln(-1)
+		}
+		pdf.Ln(3)
+	}
+
+	// Pool status (health, drives)
+	if inv.StatusText != "" {
+		pdf.SetFont("Helvetica", "B", 9)
+		pdf.SetTextColor(teal[0], teal[1], teal[2])
+		pdf.CellFormat(0, 5, "Pool Status", "", 1, "L", false, 0, "")
+		pdf.Ln(1)
+		pdf.SetFont("Courier", "", 6)
+		pdf.SetTextColor(dark[0], dark[1], dark[2])
+		for _, line := range strings.Split(inv.StatusText, "\n") {
+			pdf.CellFormat(0, 2.8, line, "", 1, "L", false, 0, "")
+		}
+		pdf.Ln(3)
+	}
+
+	// Snapshot listing
+	if inv.SnapshotText != "" {
+		pdf.SetFont("Helvetica", "B", 9)
+		pdf.SetTextColor(teal[0], teal[1], teal[2])
+		pdf.CellFormat(0, 5, "Snapshots", "", 1, "L", false, 0, "")
+		pdf.Ln(1)
+		pdf.SetFont("Courier", "", 5.5)
+		pdf.SetTextColor(gray[0], gray[1], gray[2])
+		for _, line := range strings.Split(inv.SnapshotText, "\n") {
+			pdf.CellFormat(0, 2.5, line, "", 1, "L", false, 0, "")
+		}
+		pdf.Ln(3)
+	}
+}
+
 // generatePDF creates a PDF report using the go-pdf/fpdf library (no external deps).
 func generatePDF(info ReportInfo, pdfPath string) error {
 	pdf := fpdf.New("P", "mm", "A4", "")
@@ -500,13 +758,19 @@ func generatePDF(info ReportInfo, pdfPath string) error {
 	}
 	pdf.Ln(3)
 
-	// Summary section
+	// What happened - narrative summary
+	pdfSectionHeader(pdf, dark, gray, "What Happened")
+	narrative := writeNarrativeSummary(info, totalDuration)
+	// Strip markdown bold markers for PDF
+	narrative = strings.ReplaceAll(narrative, "**", "")
+	narrative = strings.TrimSpace(narrative)
+	pdf.SetFont("Helvetica", "", 9)
 	pdf.SetTextColor(dark[0], dark[1], dark[2])
-	pdf.SetFont("Helvetica", "B", 12)
-	pdf.CellFormat(0, 8, "Summary", "", 1, "L", false, 0, "")
-	pdf.SetDrawColor(gray[0], gray[1], gray[2])
-	pdf.Line(15, pdf.GetY(), 195, pdf.GetY())
-	pdf.Ln(2)
+	pdf.MultiCell(0, 4.5, narrative, "", "L", false)
+	pdf.Ln(3)
+
+	// Technical Summary section
+	pdfSectionHeader(pdf, dark, gray, "Technical Summary")
 
 	pdfKeyValue(pdf, dark, gray, "Operation", operationLabel(info.Operation))
 	pdfKeyValue(pdf, dark, gray, "Source", info.SourcePool)
@@ -536,12 +800,7 @@ func generatePDF(info ReportInfo, pdfPath string) error {
 			}
 		}
 
-		pdf.SetFont("Helvetica", "B", 12)
-		pdf.SetTextColor(dark[0], dark[1], dark[2])
-		pdf.CellFormat(0, 8, "Dataset Sync Results", "", 1, "L", false, 0, "")
-		pdf.SetDrawColor(gray[0], gray[1], gray[2])
-		pdf.Line(15, pdf.GetY(), 195, pdf.GetY())
-		pdf.Ln(2)
+		pdfSectionHeader(pdf, dark, gray, "Dataset Sync Results")
 
 		pdf.SetFont("Helvetica", "", 9)
 		pdf.SetTextColor(gray[0], gray[1], gray[2])
@@ -594,12 +853,7 @@ func generatePDF(info ReportInfo, pdfPath string) error {
 		pdf.Ln(5)
 
 		// Backup tree
-		pdf.SetFont("Helvetica", "B", 12)
-		pdf.SetTextColor(dark[0], dark[1], dark[2])
-		pdf.CellFormat(0, 8, "Backup Tree", "", 1, "L", false, 0, "")
-		pdf.SetDrawColor(gray[0], gray[1], gray[2])
-		pdf.Line(15, pdf.GetY(), 195, pdf.GetY())
-		pdf.Ln(2)
+		pdfSectionHeader(pdf, dark, gray, "Backup Tree")
 
 		pdf.SetFont("Courier", "", 7)
 		poolIcon := "+"
@@ -701,10 +955,50 @@ func generatePDF(info ReportInfo, pdfPath string) error {
 				}
 			}
 		}
+	} else if info.ErrorMessage != "" {
+		pdfSectionHeader(pdf, dark, gray, "Error Details")
+		pdf.SetFont("Courier", "", 7)
+		pdf.SetTextColor(red[0], red[1], red[2])
+		pdf.MultiCell(0, 3.5, info.ErrorMessage, "", "L", false)
+		pdf.Ln(3)
 	}
 
-	// Footer
+	// Pool Inventory: Source
+	pdfPoolInventorySection(pdf, info.SourceInventory, "Source Pool", dark, gray, teal)
+
+	// Pool Inventory: Destination
+	pdfPoolInventorySection(pdf, info.DestInventory, "Destination Pool", dark, gray, teal)
+
+	// Operation Log
+	if info.OperationLog != "" {
+		pdfSectionHeader(pdf, dark, gray, "Operation Log")
+		pdf.SetFont("Courier", "", 5.5)
+		pdf.SetTextColor(gray[0], gray[1], gray[2])
+		for _, line := range strings.Split(info.OperationLog, "\n") {
+			pdf.CellFormat(0, 2.5, line, "", 1, "L", false, 0, "")
+		}
+		pdf.Ln(3)
+	}
+
+	// What to do next
+	pdfSectionHeader(pdf, dark, gray, "What To Do Next")
+	pdf.SetFont("Helvetica", "", 9)
+	pdf.SetTextColor(dark[0], dark[1], dark[2])
+	if info.Success {
+		pdf.MultiCell(0, 4.5, "Your data is safely backed up. No action is required.\n\n"+
+			"- To verify the backup, use \"Show zpool info\" in the application\n"+
+			"- To safely disconnect the backup drive, use \"Unmount Backup Disk\"\n"+
+			"- Previous reports are stored in ~/.local/share/zfs-backup/reports/", "", "L", false)
+	} else {
+		pdf.MultiCell(0, 4.5, "The backup did not complete successfully. Here are some things to try:\n\n"+
+			"1. Run the backup again - transient errors often resolve on retry\n"+
+			"2. Use Recover Failed Backup to clear stale receive state\n"+
+			"3. Check disk health with Pool Maintenance > Scrub\n"+
+			"4. Use Force Backup as a last resort to reset the sync chain", "", "L", false)
+	}
 	pdf.Ln(5)
+
+	// Footer
 	pdf.SetDrawColor(gray[0], gray[1], gray[2])
 	pdf.Line(15, pdf.GetY(), 195, pdf.GetY())
 	pdf.Ln(3)
