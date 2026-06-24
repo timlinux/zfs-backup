@@ -11,15 +11,38 @@ The tool works with any ZFS pool structure. When you run a backup, you'll be pro
 
 ### Example Structures
 
+All child datasets of the source pool are backed up — including application-managed
+datasets without a regular mountpoint (for example `atuin`). Every dataset on the
+destination is namespaced by the source machine's hostname so multiple hosts can
+share one backup drive without colliding.
+
 ```
-Source Pool (NIXROOT):
+Source Pool (NIXROOT) on host "abyss":
 ├── NIXROOT/home      ← Backed up
-├── NIXROOT/root
-└── NIXROOT/var
+├── NIXROOT/atuin     ← Backed up (no mountpoint, still included)
+├── NIXROOT/nix       ← Backed up
+├── NIXROOT/overflow  ← Backed up
+└── NIXROOT/root      ← Backed up
 
 Destination Pool (NIXBACKUPS):
-└── NIXBACKUPS/home   ← Backup destination
+└── NIXBACKUPS/abyss/
+    ├── NIXBACKUPS/abyss/home
+    ├── NIXBACKUPS/abyss/atuin
+    ├── NIXBACKUPS/abyss/nix
+    ├── NIXBACKUPS/abyss/overflow
+    └── NIXBACKUPS/abyss/root
 ```
+
+#### Legacy flat layout
+
+Older versions wrote some datasets to a flat path such as `NIXBACKUPS/home`. At the
+start of every backup the tool checks the destination pool for any flat-layout
+datasets that match the source pool's children and atomically renames each one into
+the hostname namespace (`zfs rename NIXBACKUPS/home NIXBACKUPS/<hostname>/home`).
+If a dataset exists at *both* the flat and the namespaced location the migration
+aborts with an error and the backup stops, so existing snapshots are never silently
+merged or destroyed — resolve the conflict by hand (typically by `zfs destroy`-ing
+whichever copy you do not want to keep) and re-run.
 
 ---
 

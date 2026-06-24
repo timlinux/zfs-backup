@@ -99,7 +99,9 @@ graph TB
     end
 ```
 
-All datasets are namespaced by hostname, allowing multiple machines to share one backup drive without conflicts. Backward-compatible with existing flat `NIXBACKUPS/home` layouts.
+All datasets — including application-managed datasets without a regular mountpoint, such as `atuin` — are namespaced by hostname so multiple machines can share one backup drive without conflicts. Every backup target lives under `NIXBACKUPS/<hostname>/<dataset>` (for example `NIXBACKUPS/abyss/home`, `NIXBACKUPS/abyss/atuin`).
+
+**Automatic migration from the legacy flat layout.** Earlier versions wrote some datasets to a flat path such as `NIXBACKUPS/home`. At the start of every backup, the tool detects any remaining flat-layout datasets and atomically renames them into the hostname namespace (`zfs rename NIXBACKUPS/home NIXBACKUPS/<hostname>/home`). If a dataset already exists at *both* the flat and the namespaced location the migration aborts with a clear error so you can resolve the conflict manually — the backup will never silently merge or destroy snapshots.
 
 ## Quick Start
 

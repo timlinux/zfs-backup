@@ -30,4 +30,15 @@ result-*
 *~
 .DS_Store
 .claude/
+.direnv/
 screenshots_gitignore
+
+# Transient working files used by Claude Code sessions
+PROMPT.log
+claude.sh
+claude.out
+issue.txt
+
+# Local docs build (venv + generated site)
+.venv-docs/
+/site/
