@@ -1,98 +1,151 @@
-# Kartoza ZFS Backup Tool
+---
+hide:
+  - navigation
+  - toc
+---
+<!-- SPDX-FileCopyrightText: Tim Sutton / Kartoza -->
+<!-- SPDX-License-Identifier: MIT -->
 
-A beautiful TUI (Terminal User Interface) for managing ZFS backups, built with Go and the Charm libraries.
+<div class="kz-hero" markdown>
 
-![Kartoza ZFS Backup Screenshot](assets/images/kartoza-zfs-backup.png)
+<span class="kz-eyebrow">KARTOZA · ZFS BACKUP</span>
 
-## Overview
+# Snapshot, send, sleep well.
 
-Kartoza ZFS Backup Tool provides an intuitive terminal interface for managing ZFS backups to external drives. It leverages the power of ZFS snapshots and incremental send/receive to efficiently backup your data while keeping you informed about what's happening at every step.
+A terminal UI for ZFS backups that does the careful, encrypted, incremental
+work for you — and shows you exactly what's happening, dataset by dataset and
+snapshot by snapshot, while it runs.
 
-## Key Features
-
-<div class="grid cards" markdown>
-
--   :material-package-variant: **Incremental Backups**
-
-    ---
-
-    Efficient snapshots with syncoid integration. Only changed data is transferred, making backups fast and bandwidth-efficient.
-
--   :material-fire: **Force Backup**
-
-    ---
-
-    Destructive backup option for when incremental chains are broken. Resets the backup to match your current source state.
-
--   :material-download: **Restore Files**
-
-    ---
-
-    Dual-panel file explorer for browsing snapshots and restoring files. Vim/yazi-style keybindings for efficient navigation.
-
--   :material-information: **Pool Information**
-
-    ---
-
-    View comprehensive pool details including structure, health, datasets, and snapshots in a scrollable display.
-
--   :material-wrench: **Pool Maintenance**
-
-    ---
-
-    Start, stop, and monitor scrub operations for data integrity verification with real-time progress.
-
--   :material-shield-lock: **Device Preparation**
-
-    ---
-
-    Create encrypted ZFS pools with AES-256-GCM on new external drives with a simple guided workflow.
-
--   :material-power-plug: **Safe Unmounting**
-
-    ---
-
-    Properly export pools and power off USB drives to prevent data corruption.
-
--   :material-console: **CLI Mode**
-
-    ---
-
-    Command-line arguments for automation and scripting in headless environments.
+<div class="kz-cta" markdown>
+[:material-rocket-launch: Get started](getting-started/index.md){ .kz-cta__primary }
+[:material-book-open-page-variant: User guide](user-guide/index.md){ .kz-cta__secondary }
+[:simple-github: GitHub](https://github.com/timlinux/zfs-backup){ .kz-cta__secondary }
+</div>
 
 </div>
 
-## Quick Start
+![Kartoza ZFS Backup Tool](assets/images/kartoza-zfs-backup.png){ .kz-figure }
 
-```bash
-# Run with sudo for full ZFS access
-sudo zfs-backup
+## Why it exists
 
-# Or use CLI mode for automation
-sudo zfs-backup --backup
-```
+ZFS already has the right primitives for backups — atomic snapshots,
+incremental send/receive, bookmarks, native encryption. What's missing for
+most people is a calm, observable way to drive them. Cron + a wall of stderr
+is the usual answer; the usual outcome is that nobody notices when the chain
+breaks.
 
-## How It Works
+This tool wraps those primitives in a terminal interface that walks you
+through the whole flow: import the encrypted destination, snapshot the source,
+send only what changed, prune the chain, eject the disk. Every step is named,
+timed, and visualised — including a live snapshot-by-snapshot dot grid so you
+can *see* the backup catch up rather than guess.
 
-The tool uses ZFS's built-in snapshot and send/receive capabilities to create efficient, incremental backups:
+## What you can do with it
 
-1. **Snapshots** capture the exact state of your data at a point in time
-2. **Incremental sends** transfer only the changes since the last backup
-3. **Bookmarks** replace old local snapshots to save space while maintaining the backup chain
-4. **Encryption** keeps your backup data secure at rest
+<div class="grid cards" markdown>
 
-## Requirements
+-   :material-package-variant:{ .lg .middle } __Incremental backups__
 
-- Linux with ZFS filesystem
-- At least one ZFS pool (source)
-- External drive with encrypted ZFS pool (destination)
-- [syncoid](https://github.com/jimsalterjrs/sanoid) from the sanoid package
-- Root privileges or ZFS delegation configured
+    ---
 
-## Support
+    Snapshot the entire source pool and let `syncoid` send only the changes
+    since the previous run. The destination receives at block level — fast,
+    bandwidth-efficient, and faithful.
 
-Having issues? Check the [User Guide](user-guide/getting-started.md) or open an issue on [GitHub](https://github.com/kartoza/zfs-backup/issues).
+    [:octicons-arrow-right-24: Backup operations](user-guide/backup-operations.md)
 
----
+-   :material-server-network:{ .lg .middle } __Multi-host on one drive__
 
-Made with :heart: by [Kartoza](https://kartoza.com) | [Donate!](https://github.com/sponsors/kartoza) | [GitHub](https://github.com/kartoza/zfs-backup)
+    ---
+
+    Every dataset lives under `NIXBACKUPS/<hostname>/<dataset>` so multiple
+    machines can share one encrypted disk without colliding. Legacy flat
+    layouts are auto-migrated on first run.
+
+    [:octicons-arrow-right-24: Configuration](admin-guide/configuration.md)
+
+-   :material-cloud-sync:{ .lg .middle } __Pull and push over SSH__
+
+    ---
+
+    Pull snapshots from a remote machine to a local drive, or push local
+    snapshots to a remote backup server — same UI, same progress reporting,
+    same hostname namespacing.
+
+    [:octicons-arrow-right-24: Backup operations](user-guide/backup-operations.md)
+
+-   :material-download:{ .lg .middle } __Browse and restore__
+
+    ---
+
+    Open any snapshot in a dual-panel file explorer with vim/yazi
+    keybindings, walk the tree, and restore individual files or directories
+    to any location.
+
+    [:octicons-arrow-right-24: Restore files](user-guide/restore-files.md)
+
+-   :material-shield-lock:{ .lg .middle } __Encrypted by default__
+
+    ---
+
+    The destination pool is created with ZFS native AES-256-GCM encryption.
+    The key is prompted for on every import; data at rest is never in clear.
+
+    [:octicons-arrow-right-24: Configuration](admin-guide/configuration.md)
+
+-   :material-file-document-multiple:{ .lg .middle } __Full PDF reports__
+
+    ---
+
+    After every run, a markdown + PDF report lands in
+    `~/.local/share/zfs-backup/reports/` with timings, sizes, snapshot dot
+    grids, and the full pool inventory.
+
+    [:octicons-arrow-right-24: Pool information](user-guide/pool-info.md)
+
+</div>
+
+## Install
+
+<div class="grid cards" markdown>
+
+-   :material-snowflake:{ .lg .middle } __Nix / NixOS__
+
+    ---
+
+    `nix run github:timlinux/zfs-backup` — straight from the flake, no install
+    step.
+
+    [:octicons-arrow-right-24: Installation](admin-guide/installation.md)
+
+-   :material-linux:{ .lg .middle } __Linux binary__
+
+    ---
+
+    Single static binary on the [releases page](https://github.com/timlinux/zfs-backup/releases) — drop into `/usr/local/bin/` and run with `sudo`.
+
+    [:octicons-arrow-right-24: Installation](admin-guide/installation.md)
+
+-   :material-source-branch:{ .lg .middle } __From source__
+
+    ---
+
+    `go build` inside the `nix develop` shell. Everything reproducibly
+    pinned via the flake.
+
+    [:octicons-arrow-right-24: Building](developer-guide/building.md)
+
+</div>
+
+## Project status
+
+[![Docs](https://github.com/timlinux/zfs-backup/actions/workflows/docs.yml/badge.svg)](https://github.com/timlinux/zfs-backup/actions/workflows/docs.yml)
+[![Release](https://github.com/timlinux/zfs-backup/actions/workflows/release.yml/badge.svg)](https://github.com/timlinux/zfs-backup/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/timlinux/zfs-backup)](https://github.com/timlinux/zfs-backup/releases)
+[![License](https://img.shields.io/github/license/timlinux/zfs-backup)](https://github.com/timlinux/zfs-backup/blob/main/LICENSE)
+
+<div class="kz-footer-credits" markdown>
+Made with 💗 by [Kartoza](https://kartoza.com) &middot;
+[Sponsor on GitHub](https://github.com/sponsors/kartoza) &middot;
+[Repository](https://github.com/timlinux/zfs-backup)
+</div>

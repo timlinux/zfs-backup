@@ -2714,7 +2714,9 @@ func (m model) renderSnapshotMatrix(snapshots []SnapshotDot, width int) string {
 		case SnapPending:
 			dot = dotPending.Render("○")
 		case SnapSyncing:
-			dot = dotSyncing.Render("●")
+			// Animated spinner glyph so the in-flight snapshot is visibly
+			// pulsing/flashing rather than just a static orange dot.
+			dot = dotSyncing.Render(m.spinner.View())
 		case SnapDone:
 			dot = dotDone.Render("●")
 		case SnapError:

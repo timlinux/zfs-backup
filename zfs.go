@@ -62,11 +62,13 @@ func resolveBackupDestination(destPool, hostname, datasetSuffix string) string {
 	return namespacedPath
 }
 
-// getChildDatasets returns the child dataset names (suffixes) of a pool.
+// getChildDatasets returns the direct child dataset names (suffixes) of a pool.
 // For example, for pool NIXROOT with datasets NIXROOT/home, NIXROOT/nix, NIXROOT/root,
 // it returns ["home", "nix", "root"]. The pool root dataset itself is excluded.
+// All children are included regardless of mountpoint, so application-managed
+// datasets (e.g. atuin with mountpoint=`-`) are still backed up.
 func getChildDatasets(pool string) ([]string, error) {
-	output, err := runCommandOutput("zfs", "list", "-H", "-o", "name,mountpoint", "-r", pool)
+	output, err := runCommandOutput("zfs", "list", "-H", "-o", "name", "-r", pool)
 	if err != nil {
 		return nil, err
 	}
@@ -74,26 +76,10 @@ func getChildDatasets(pool string) ([]string, error) {
 	var datasets []string
 	prefix := pool + "/"
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+		name := strings.TrimSpace(line)
+		if name == "" || name == pool {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		name := fields[0]
-		mountpoint := fields[1]
-		if name == pool {
-			continue
-		}
-		// Skip datasets with no mountpoint ("-") - these are non-mounted
-		// filesystems (e.g. application-specific datasets like atuin) that
-		// should not be synced
-		if mountpoint == "-" {
-			continue
-		}
-		// Only include direct children (not nested like pool/a/b)
 		if strings.HasPrefix(name, prefix) {
 			suffix := strings.TrimPrefix(name, prefix)
 			if !strings.Contains(suffix, "/") {
@@ -106,8 +92,9 @@ func getChildDatasets(pool string) ([]string, error) {
 }
 
 // getRemoteChildDatasets returns child dataset names from a remote host via SSH.
+// Mirrors getChildDatasets: includes all direct children regardless of mountpoint.
 func getRemoteChildDatasets(sshHost, pool string) ([]string, error) {
-	output, err := runCommandOutput("ssh", sshHost, "zfs", "list", "-H", "-o", "name,mountpoint", "-r", pool)
+	output, err := runCommandOutput("ssh", sshHost, "zfs", "list", "-H", "-o", "name", "-r", pool)
 	if err != nil {
 		return nil, err
 	}
@@ -115,21 +102,8 @@ func getRemoteChildDatasets(sshHost, pool string) ([]string, error) {
 	var datasets []string
 	prefix := pool + "/"
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		name := fields[0]
-		mountpoint := fields[1]
-		if name == pool {
-			continue
-		}
-		// Skip non-mounted datasets (mountpoint "-")
-		if mountpoint == "-" {
+		name := strings.TrimSpace(line)
+		if name == "" || name == pool {
 			continue
 		}
 		if strings.HasPrefix(name, prefix) {
@@ -473,6 +447,12 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 
 		output.WriteString(fmt.Sprintf("Found %d dataset(s) to sync: %s\n\n", len(datasets), strings.Join(datasets, ", ")))
 
+		// Migrate any legacy flat-layout datasets into the hostname namespace
+		// before anything else writes to the destination pool.
+		if err := migrateLegacyDestinationLayout(ctx, destPool, hostname, datasets, &output); err != nil {
+			return err
+		}
+
 		// Initialize per-dataset progress with snapshot discovery and sizes
 		dsProgress := initDatasetProgress(datasets)
 		for i, ds := range datasets {
@@ -491,7 +471,6 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 			output.WriteString(fmt.Sprintf("[Dataset %d/%d] %s -> %s\n", i+1, len(datasets), syncSrc, syncDest))
 
 			dsProgress[i].Status = DatasetSyncing
-			setAllSnapshotStatus(dsProgress[i].Snapshots, SnapSyncing)
 			sendDatasetProgress(progressChan, fmt.Sprintf("Syncing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 
 			if err := ensureDatasetExists(ctx, syncDest); err != nil {
@@ -512,13 +491,22 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 				return fmt.Errorf("error waiting for existing receive on %s: %w", ds, err)
 			}
 
-			if err := runSyncoidWithTimeout(ctx, syncoidTimeout, "--create-bookmark", syncSrc, syncDest); err != nil {
+			syncErr := trackSyncProgress(
+				ctx,
+				dsProgress[i].Snapshots,
+				func() map[string]bool { return listDestSnapshotTags(syncDest) },
+				func() {
+					sendDatasetProgress(progressChan, fmt.Sprintf("Syncing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
+				},
+				func() error {
+					return runSyncoidWithTimeout(ctx, syncoidTimeout, "--create-bookmark", syncSrc, syncDest)
+				},
+			)
+			if syncErr != nil {
 				dsProgress[i].Status = DatasetError
-				dsProgress[i].ErrorMsg = err.Error()
-				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
+				dsProgress[i].ErrorMsg = syncErr.Error()
 			} else {
 				dsProgress[i].Status = DatasetDone
-				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapDone)
 			}
 			dsProgress[i].Duration = time.Since(dsStart)
 			sendDatasetProgress(progressChan, "Syncing data to backup disk", currentStage-1, totalStages, state, dsProgress, i)
@@ -773,6 +761,10 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 
 		output.WriteString(fmt.Sprintf("Found %d dataset(s) to force sync: %s\n\n", len(datasets), strings.Join(datasets, ", ")))
 
+		if err := migrateLegacyDestinationLayout(ctx, destPool, hostname, datasets, &output); err != nil {
+			return err
+		}
+
 		dsProgress := initDatasetProgress(datasets)
 		for i, ds := range datasets {
 			fullDS := fmt.Sprintf("%s/%s", sourcePool, ds)
@@ -788,7 +780,6 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 			dsStart := time.Now()
 
 			dsProgress[i].Status = DatasetSyncing
-			setAllSnapshotStatus(dsProgress[i].Snapshots, SnapSyncing)
 			sendDatasetProgress(progressChan, fmt.Sprintf("Force syncing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 
 			if err := ensureDatasetExists(ctx, syncDest); err != nil {
@@ -809,13 +800,22 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 				return fmt.Errorf("error waiting for existing receive on %s: %w", ds, err)
 			}
 
-			if err := runSyncoidWithTimeout(ctx, syncoidTimeout, "--force-delete", syncSrc, syncDest); err != nil {
+			syncErr := trackSyncProgress(
+				ctx,
+				dsProgress[i].Snapshots,
+				func() map[string]bool { return listDestSnapshotTags(syncDest) },
+				func() {
+					sendDatasetProgress(progressChan, fmt.Sprintf("Force syncing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
+				},
+				func() error {
+					return runSyncoidWithTimeout(ctx, syncoidTimeout, "--force-delete", syncSrc, syncDest)
+				},
+			)
+			if syncErr != nil {
 				dsProgress[i].Status = DatasetError
-				dsProgress[i].ErrorMsg = err.Error()
-				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
+				dsProgress[i].ErrorMsg = syncErr.Error()
 			} else {
 				dsProgress[i].Status = DatasetDone
-				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapDone)
 			}
 			dsProgress[i].Duration = time.Since(dsStart)
 			sendDatasetProgress(progressChan, "Force syncing to backup disk", currentStage-1, totalStages, state, dsProgress, i)
@@ -1409,7 +1409,6 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 			dsStart := time.Now()
 
 			dsProgress[i].Status = DatasetSyncing
-			setAllSnapshotStatus(dsProgress[i].Snapshots, SnapSyncing)
 			sendDatasetProgress(progressChan, fmt.Sprintf("Syncing %s", suffix), currentStage-1, totalStages, state, dsProgress, i)
 
 			if err := ensureDatasetExists(ctx, syncDest); err != nil {
@@ -1430,13 +1429,22 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 				return fmt.Errorf("error waiting for existing receive on %s: %w", ds, err)
 			}
 
-			if err := runSyncoidWithTimeout(ctx, syncoidTimeout, "--create-bookmark", syncSrc, syncDest); err != nil {
+			syncErr := trackSyncProgress(
+				ctx,
+				dsProgress[i].Snapshots,
+				func() map[string]bool { return listDestSnapshotTags(syncDest) },
+				func() {
+					sendDatasetProgress(progressChan, fmt.Sprintf("Syncing %s", suffix), currentStage-1, totalStages, state, dsProgress, i)
+				},
+				func() error {
+					return runSyncoidWithTimeout(ctx, syncoidTimeout, "--create-bookmark", syncSrc, syncDest)
+				},
+			)
+			if syncErr != nil {
 				dsProgress[i].Status = DatasetError
-				dsProgress[i].ErrorMsg = err.Error()
-				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
+				dsProgress[i].ErrorMsg = syncErr.Error()
 			} else {
 				dsProgress[i].Status = DatasetDone
-				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapDone)
 			}
 			dsProgress[i].Duration = time.Since(dsStart)
 			sendDatasetProgress(progressChan, "Syncing data from remote host", currentStage-1, totalStages, state, dsProgress, i)
@@ -1615,7 +1623,6 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 			dsStart := time.Now()
 
 			dsProgress[i].Status = DatasetSyncing
-			setAllSnapshotStatus(dsProgress[i].Snapshots, SnapSyncing)
 			sendDatasetProgress(progressChan, fmt.Sprintf("Pushing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 
 			if err := ensureRemoteDatasetExists(ctx, remoteHost, remoteDatasetPath); err != nil {
@@ -1627,13 +1634,22 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 				continue
 			}
 
-			if err := runSyncoidWithTimeout(ctx, syncoidTimeout, "--create-bookmark", syncSrc, remoteDest); err != nil {
+			syncErr := trackSyncProgress(
+				ctx,
+				dsProgress[i].Snapshots,
+				func() map[string]bool { return listRemoteDestSnapshotTags(remoteHost, remoteDatasetPath) },
+				func() {
+					sendDatasetProgress(progressChan, fmt.Sprintf("Pushing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
+				},
+				func() error {
+					return runSyncoidWithTimeout(ctx, syncoidTimeout, "--create-bookmark", syncSrc, remoteDest)
+				},
+			)
+			if syncErr != nil {
 				dsProgress[i].Status = DatasetError
-				dsProgress[i].ErrorMsg = err.Error()
-				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
+				dsProgress[i].ErrorMsg = syncErr.Error()
 			} else {
 				dsProgress[i].Status = DatasetDone
-				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapDone)
 			}
 			dsProgress[i].Duration = time.Since(dsStart)
 			sendDatasetProgress(progressChan, "Pushing data to remote host", currentStage-1, totalStages, state, dsProgress, i)
@@ -1847,6 +1863,201 @@ func setAllSnapshotStatus(dots []SnapshotDot, status SnapshotStatus) {
 	}
 }
 
+// listDestSnapshotTags returns the set of snapshot tags present on the given
+// destination dataset. An empty map (and no error) is returned if the dataset
+// does not yet exist or has no snapshots.
+func listDestSnapshotTags(dataset string) map[string]bool {
+	out, err := runCommandOutput("zfs", "list", "-H", "-o", "name", "-t", "snapshot", "-d", "1", dataset)
+	tags := make(map[string]bool)
+	if err != nil {
+		return tags
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "@", 2)
+		if len(parts) == 2 {
+			tags[parts[1]] = true
+		}
+	}
+	return tags
+}
+
+// listRemoteDestSnapshotTags is the SSH equivalent of listDestSnapshotTags.
+func listRemoteDestSnapshotTags(sshHost, dataset string) map[string]bool {
+	out, err := runCommandOutput("ssh", sshHost, "zfs", "list", "-H", "-o", "name", "-t", "snapshot", "-d", "1", dataset)
+	tags := make(map[string]bool)
+	if err != nil {
+		return tags
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "@", 2)
+		if len(parts) == 2 {
+			tags[parts[1]] = true
+		}
+	}
+	return tags
+}
+
+// applySnapshotProgress updates dot statuses based on which snapshot tags are
+// present at the destination. Tags present on the destination are marked Done.
+// While inFlight is true, the first not-yet-present tag (in source order) is
+// marked Syncing so the UI shows it as the currently-transferring snapshot.
+// All remaining not-yet-present tags are marked Pending. When inFlight is
+// false (after the sync finishes) the still-missing tags retain their previous
+// status (set by the caller, e.g. SnapError or SnapDone).
+func applySnapshotProgress(dots []SnapshotDot, present map[string]bool, inFlight bool) {
+	foundFirstMissing := false
+	for i := range dots {
+		if present[dots[i].Tag] {
+			dots[i].Status = SnapDone
+			continue
+		}
+		if !inFlight {
+			continue
+		}
+		if !foundFirstMissing {
+			dots[i].Status = SnapSyncing
+			foundFirstMissing = true
+		} else {
+			dots[i].Status = SnapPending
+		}
+	}
+}
+
+// trackSyncProgress wraps a sync operation with live per-snapshot progress
+// tracking. While syncFn runs, a background goroutine polls the destination
+// every ~2s via listDest. Snapshots that have arrived are marked SnapDone,
+// the next still-missing one is marked SnapSyncing, and the rest stay
+// SnapPending. After syncFn returns, the dots are reconciled one last time
+// against the destination: on success every missing tag is forced to SnapDone
+// (in case the poll race missed the final snapshot), and on failure the next
+// missing tag is marked SnapError so the user can see exactly where the chain
+// broke. report is invoked after each update so the UI redraws.
+//
+// The poller and the post-sync reconciliation run in separate goroutines that
+// are serialised via cancel/wait, so only one goroutine writes to dots at any
+// given time.
+func trackSyncProgress(
+	ctx context.Context,
+	dots []SnapshotDot,
+	listDest func() map[string]bool,
+	report func(),
+	syncFn func() error,
+) error {
+	applySnapshotProgress(dots, listDest(), true)
+	report()
+
+	pollCtx, cancel := context.WithCancel(ctx)
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pollCtx.Done():
+				return
+			case <-ticker.C:
+				applySnapshotProgress(dots, listDest(), true)
+				report()
+			}
+		}
+	}()
+
+	syncErr := syncFn()
+	cancel()
+	<-pollDone
+
+	final := listDest()
+	if syncErr == nil {
+		// Belt-and-braces: force every dot to Done.
+		for i := range dots {
+			dots[i].Status = SnapDone
+		}
+	} else {
+		applySnapshotProgress(dots, final, false)
+		foundFirstMissing := false
+		for i := range dots {
+			if final[dots[i].Tag] {
+				dots[i].Status = SnapDone
+				continue
+			}
+			if !foundFirstMissing {
+				dots[i].Status = SnapError
+				foundFirstMissing = true
+			} else {
+				dots[i].Status = SnapPending
+			}
+		}
+	}
+	report()
+	return syncErr
+}
+
+// migrateLegacyDestinationLayout renames any datasets sitting at the legacy
+// flat path (<destPool>/<ds>) into the hostname-namespaced layout
+// (<destPool>/<hostname>/<ds>). Returns an error if a dataset exists at both
+// the flat and the namespaced location, since silently merging would risk
+// data loss. Writes a one-line note to output for every rename performed.
+func migrateLegacyDestinationLayout(ctx context.Context, destPool, hostname string, datasets []string, output *strings.Builder) error {
+	type pending struct {
+		from string
+		to   string
+	}
+	var renames []pending
+	var conflicts []string
+
+	for _, ds := range datasets {
+		flatPath := fmt.Sprintf("%s/%s", destPool, ds)
+		nsPath := getHostnameDatasetPath(destPool, hostname, ds)
+
+		_, flatErr := runCommandOutput("zfs", "list", "-H", flatPath)
+		_, nsErr := runCommandOutput("zfs", "list", "-H", nsPath)
+
+		flatExists := flatErr == nil
+		nsExists := nsErr == nil
+
+		if flatExists && nsExists {
+			conflicts = append(conflicts, ds)
+			continue
+		}
+		if flatExists && !nsExists {
+			renames = append(renames, pending{from: flatPath, to: nsPath})
+		}
+	}
+
+	if len(conflicts) > 0 {
+		return fmt.Errorf("legacy-layout migration aborted: datasets exist at both %s/<name> and %s/%s/<name> for: %s. Please resolve manually (e.g. zfs destroy the unwanted copy)",
+			destPool, destPool, hostname, strings.Join(conflicts, ", "))
+	}
+
+	if len(renames) == 0 {
+		return nil
+	}
+
+	output.WriteString(fmt.Sprintf("Migrating %d legacy dataset(s) to hostname namespace (%s/%s/...)\n", len(renames), destPool, hostname))
+
+	nsParent := fmt.Sprintf("%s/%s", destPool, hostname)
+	if err := ensureDatasetExists(ctx, nsParent); err != nil {
+		return fmt.Errorf("failed to create %s parent for migration: %w", nsParent, err)
+	}
+
+	for _, r := range renames {
+		output.WriteString(fmt.Sprintf("  zfs rename %s -> %s\n", r.from, r.to))
+		if err := runCommandWithContext(ctx, "zfs", "rename", r.from, r.to); err != nil {
+			return fmt.Errorf("failed to rename %s to %s: %w", r.from, r.to, err)
+		}
+	}
+	return nil
+}
+
 // getDatasetSize returns the "used" size of a dataset as a human-readable string
 func getDatasetSize(dataset string) string {
 	output, err := runCommandOutput("zfs", "list", "-H", "-o", "used", dataset)
@@ -1856,14 +2067,21 @@ func getDatasetSize(dataset string) string {
 	return strings.TrimSpace(output)
 }
 
-// sendDatasetProgress sends a dataset-level progress update to the UI channel
+// sendDatasetProgress sends a dataset-level progress update to the UI channel.
+// Deep-copies each dataset's Snapshots slice so the background poller in
+// trackSyncProgress can keep mutating dot statuses without racing the UI.
 func sendDatasetProgress(progressChan chan<- progressUpdate, stage string, stageNum, totalStages int, state *BackupState, datasets []DatasetProgress, currentIdx int) {
 	if progressChan == nil {
 		return
 	}
-	// Make a copy of datasets slice to avoid races
 	dsCopy := make([]DatasetProgress, len(datasets))
-	copy(dsCopy, datasets)
+	for i, d := range datasets {
+		dsCopy[i] = d
+		if len(d.Snapshots) > 0 {
+			dsCopy[i].Snapshots = make([]SnapshotDot, len(d.Snapshots))
+			copy(dsCopy[i].Snapshots, d.Snapshots)
+		}
+	}
 	progressChan <- progressUpdate{
 		stage:          stage,
 		stageNum:       stageNum,
