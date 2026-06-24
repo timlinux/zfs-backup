@@ -1,53 +1,348 @@
-/* Kartoza Brand Colors */
-:root {
-  --kartoza-gold: #DF9E2F;
-  --kartoza-blue: #569FC6;
-  --kartoza-gray: #8A8B8B;
-  --kartoza-teal: #06969A;
-  --kartoza-red: #CC0403;
+/* SPDX-FileCopyrightText: Tim Sutton / Kartoza
+   SPDX-License-Identifier: MIT
+
+   Kartoza Brand Pack — Material for MkDocs adapter for zfs-backup.
+   Consumes kartoza-tokens.css as the single source of truth for colour
+   and type (one token source, no hardcoded hexes).
+
+   Brand rules:
+     · Flat — no shadows, bevels, glows or gradients on UI elements.
+     · Charcoal carries body text.
+     · Blue is the primary accent; Amber is the secondary/highlight accent.
+     · Blue + Amber are never body text — they fail WCAG AA on white.
+     · Nunito for everything; JetBrains Mono for code. */
+
+/* -----------------------------------------------------------------------
+   mkdocs-material primary/accent mapping.
+   ----------------------------------------------------------------------- */
+
+[data-md-color-primary="custom"] {
+    --md-primary-fg-color:            var(--text-default);
+    --md-primary-fg-color--light:     var(--text-muted);
+    --md-primary-fg-color--dark:      #1f1f1f;
+    --md-primary-bg-color:            var(--surface-white);
+    --md-primary-bg-color--light:     rgba(255, 255, 255, 0.7);
 }
 
+[data-md-color-accent="custom"] {
+    --md-accent-fg-color:             var(--kartoza-blue);
+    --md-accent-fg-color--transparent: rgba(84, 162, 204, 0.10);
+    --md-accent-bg-color:             var(--surface-white);
+    --md-accent-bg-color--light:      rgba(255, 255, 255, 0.7);
+}
+
+/* Light scheme */
 [data-md-color-scheme="default"] {
-  --md-primary-fg-color: #DF9E2F;
-  --md-primary-fg-color--light: #E8B45A;
-  --md-primary-fg-color--dark: #C88A1F;
-  --md-accent-fg-color: #569FC6;
+    --md-default-bg-color:            var(--surface-white);
+    --md-default-fg-color:            var(--text-default);
+    --md-default-fg-color--light:     var(--text-muted);
+    --md-default-fg-color--lighter:   var(--rule-line);
+    --md-default-fg-color--lightest:  var(--surface-cloud);
+    --md-typeset-a-color:             var(--kartoza-blue);
+    --md-code-bg-color:               var(--surface-cloud);
+    --md-code-fg-color:               var(--text-default);
+    --md-code-hl-color:               rgba(238, 179, 72, 0.18);
+    --md-typeset-mark-color:          rgba(238, 179, 72, 0.28);
+    --md-footer-bg-color:             var(--text-default);
+    --md-footer-bg-color--dark:       #1f1f1f;
+}
+[data-md-color-scheme="default"] .md-header,
+[data-md-color-scheme="default"] .md-tabs {
+    background: var(--text-default);
+    color: var(--surface-white);
 }
 
+/* Dark scheme */
 [data-md-color-scheme="slate"] {
-  --md-primary-fg-color: #DF9E2F;
-  --md-primary-fg-color--light: #E8B45A;
-  --md-primary-fg-color--dark: #C88A1F;
-  --md-accent-fg-color: #569FC6;
+    --md-default-bg-color:            #1c1d1d;
+    --md-default-fg-color:            var(--surface-cloud);
+    --md-default-fg-color--light:     #c8c9c4;
+    --md-default-fg-color--lighter:   #6d6f6f;
+    --md-default-fg-color--lightest:  #2a2b2b;
+    --md-typeset-a-color:             var(--kartoza-blue);
+    --md-code-bg-color:               #262727;
+    --md-code-fg-color:               var(--surface-cloud);
+    --md-typeset-mark-color:          rgba(238, 179, 72, 0.32);
+}
+[data-md-color-scheme="slate"] .md-header,
+[data-md-color-scheme="slate"] .md-tabs {
+    background: var(--text-default);
+    color: var(--surface-white);
 }
 
-/* Footer styling */
-.md-footer {
-  background-color: #1E1E1E;
+/* Typography */
+body, .md-typeset, .md-header, .md-tabs {
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "ss02";
+}
+.md-typeset h1, .md-typeset h2, .md-typeset h3, .md-typeset h4 {
+    font-family: var(--font-sans);
+    color: var(--md-default-fg-color);
+    font-weight: 700;
+    letter-spacing: -0.005em;
+    line-height: 1.2;
+}
+.md-typeset h1 { font-size: 2rem; font-weight: 800; margin-bottom: 0.4em; }
+.md-typeset h2 { font-size: 1.4rem; margin-top: 2.2em; }
+.md-typeset h3 { font-size: 1.1rem; }
+.md-typeset code, .md-typeset pre { font-family: var(--font-mono); }
+.md-typeset code { border-radius: 0.25rem; padding: 0.05em 0.35em; }
+
+/* Eyebrows — KARTOZA · X style */
+.md-typeset .kz-eyebrow {
+    display: inline-block;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin-bottom: 1rem;
 }
 
-.md-footer-meta {
-  background-color: #1E1E1E;
+/* -----------------------------------------------------------------------
+   Hero block on the landing page.
+   ----------------------------------------------------------------------- */
+.kz-hero {
+    position: relative;
+    text-align: center;
+    padding: 2.5rem 1.75rem;
+    margin: -1.5rem -0.75rem 2rem -0.75rem;
+    border-radius: 0.75rem;
+    background-color: var(--surface-cloud);
+    color: var(--text-default);
+    overflow: hidden;
+}
+[data-md-color-scheme="slate"] .kz-hero {
+    background-color: #232525;
+    color: var(--surface-cloud);
+}
+.kz-hero h1 {
+    margin: 0.25rem auto 0.5rem;
+    max-width: 24ch;
+    font-size: 2.2rem;
+    line-height: 1.1;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+}
+.kz-hero p {
+    margin: 0 auto 1.5rem;
+    max-width: 55ch;
+    font-size: 1rem;
+    line-height: 1.5;
+    color: var(--text-default);
+}
+.kz-hero .kz-eyebrow { margin-bottom: 0.5rem; }
+[data-md-color-scheme="slate"] .kz-hero p { color: var(--surface-cloud); }
+
+/* Centred figure below the hero. */
+.kz-figure {
+    display: block;
+    margin: 0 auto 2rem;
+    max-width: 800px;
+    border-radius: 0.5rem;
+    border: 1px solid var(--rule-line);
 }
 
-/* Code block styling */
-.highlight code {
-  border-radius: 4px;
+/* CTA buttons */
+.kz-cta, .kz-cta > p {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin: 0;
+    justify-content: center;
+}
+.md-typeset .kz-cta a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.7rem 1.25rem;
+    border-radius: 0.375rem;
+    font-weight: 700;
+    text-decoration: none;
+    transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.md-typeset .kz-cta a.kz-cta__primary {
+    background: var(--kartoza-blue);
+    color: var(--surface-white);
+    border: 2px solid var(--kartoza-blue);
+}
+.md-typeset .kz-cta a.kz-cta__primary:hover {
+    background: #4790b8;
+    border-color: #4790b8;
+    color: var(--surface-white);
+}
+.md-typeset .kz-cta a.kz-cta__secondary {
+    background: var(--surface-white);
+    color: var(--text-default);
+    border: 2px solid var(--text-default);
+}
+.md-typeset .kz-cta a.kz-cta__secondary:hover {
+    background: var(--text-default);
+    color: var(--surface-white);
+}
+[data-md-color-scheme="slate"] .md-typeset .kz-cta a.kz-cta__secondary {
+    background: transparent;
+    color: var(--surface-cloud);
+    border-color: var(--surface-cloud);
+}
+[data-md-color-scheme="slate"] .md-typeset .kz-cta a.kz-cta__secondary:hover {
+    background: var(--surface-cloud);
+    color: var(--text-default);
+}
+@media (max-width: 768px) {
+    .kz-hero { padding: 2rem 1.5rem; }
+    .kz-hero h1 { font-size: 1.8rem; }
 }
 
-/* Admonition styling */
-.admonition.warning {
-  border-color: var(--kartoza-gold);
+/* -----------------------------------------------------------------------
+   Material's built-in grid cards — restyle flat.
+   ----------------------------------------------------------------------- */
+.md-typeset .grid.cards > ul > li,
+.md-typeset .grid.cards > ol > li {
+    background: var(--surface-white);
+    border: 1px solid var(--rule-line);
+    border-radius: 0.5rem;
+    box-shadow: none;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.md-typeset .grid.cards > ul > li:hover,
+.md-typeset .grid.cards > ol > li:hover {
+    border-color: var(--kartoza-blue);
+    background: var(--surface-cloud);
+    box-shadow: none;
+    transform: none;
+}
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ul > li,
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ol > li {
+    background: #232525;
+    border-color: #3a3b3b;
+}
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ul > li:hover,
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ol > li:hover {
+    border-color: var(--kartoza-blue);
+    background: #2a2c2c;
+}
+.md-typeset .grid.cards .twemoji.lg,
+.md-typeset .grid.cards .twemoji.lg svg {
+    color: var(--kartoza-blue);
 }
 
-.admonition.danger {
-  border-color: var(--kartoza-red);
+/* -----------------------------------------------------------------------
+   Walkthrough screenshot styling.
+   ----------------------------------------------------------------------- */
+.md-typeset img.kz-screenshot {
+    display: block;
+    margin: 1rem auto;
+    max-width: 900px;
+    width: 100%;
+    height: auto;
+    border-radius: 0.5rem;
+    border: 1px solid var(--rule-line);
+    box-shadow: none;
+}
+.md-typeset .kz-step-num {
+    display: inline-block;
+    min-width: 1.75rem;
+    height: 1.75rem;
+    padding: 0 0.5rem;
+    border-radius: 0.875rem;
+    background: var(--kartoza-blue);
+    color: var(--surface-white);
+    font-weight: 800;
+    text-align: center;
+    line-height: 1.75rem;
+    margin-right: 0.5rem;
 }
 
-.admonition.tip {
-  border-color: var(--kartoza-teal);
+/* -----------------------------------------------------------------------
+   Admonitions — brand-coloured.
+   ----------------------------------------------------------------------- */
+.md-typeset .admonition,
+.md-typeset details {
+    border: 0;
+    border-left: 4px solid var(--rule-line);
+    border-radius: 0.25rem;
+    background: var(--surface-cloud);
+    box-shadow: none;
+    font-size: 0.78rem;
+}
+.md-typeset .admonition-title,
+.md-typeset summary {
+    background: transparent;
+    color: var(--text-default);
+    font-weight: 700;
+}
+.md-typeset .admonition.info, .md-typeset details.info,
+.md-typeset .admonition.tip,  .md-typeset details.tip {
+    border-left-color: var(--kartoza-blue);
+    background: rgba(84, 162, 204, 0.08);
+}
+.md-typeset .info > .admonition-title::before,
+.md-typeset .tip  > .admonition-title::before { background-color: var(--kartoza-blue); }
+
+.md-typeset .admonition.warning, .md-typeset details.warning {
+    border-left-color: var(--status-warn);
+    background: var(--status-warn-tint);
+}
+.md-typeset .warning > .admonition-title::before { background-color: var(--status-warn); }
+
+.md-typeset .admonition.note, .md-typeset details.note {
+    border-left-color: var(--kartoza-grey);
+    background: var(--surface-cloud);
+}
+.md-typeset .note > .admonition-title::before { background-color: var(--kartoza-grey); }
+
+.md-typeset .admonition.success, .md-typeset details.success {
+    border-left-color: var(--status-success);
+    background: var(--status-success-tint);
+}
+.md-typeset .success > .admonition-title::before { background-color: var(--status-success); }
+
+.md-typeset .admonition.danger, .md-typeset details.danger,
+.md-typeset .admonition.failure, .md-typeset details.failure {
+    border-left-color: var(--status-error);
+    background: var(--status-error-tint);
+}
+.md-typeset .danger  > .admonition-title::before,
+.md-typeset .failure > .admonition-title::before { background-color: var(--status-error); }
+
+[data-md-color-scheme="slate"] .md-typeset .admonition,
+[data-md-color-scheme="slate"] .md-typeset details { background: #2a2b2b; }
+[data-md-color-scheme="slate"] .md-typeset .admonition.info,
+[data-md-color-scheme="slate"] .md-typeset details.info,
+[data-md-color-scheme="slate"] .md-typeset .admonition.tip,
+[data-md-color-scheme="slate"] .md-typeset details.tip { background: rgba(84, 162, 204, 0.16); }
+
+/* -----------------------------------------------------------------------
+   Footer credits + tables.
+   ----------------------------------------------------------------------- */
+.kz-footer-credits {
+    text-align: center;
+    margin: 3rem 0 1rem;
+    font-size: 0.95rem;
+    color: var(--text-muted);
+}
+.kz-footer-credits a {
+    font-weight: 700;
+    color: var(--kartoza-blue);
 }
 
-.admonition.info {
-  border-color: var(--kartoza-blue);
+.md-typeset table:not([class]) {
+    box-shadow: none;
+    border: 1px solid var(--rule-line);
+    border-radius: 0.25rem;
 }
+.md-typeset table:not([class]) th {
+    background: var(--text-default);
+    color: var(--surface-white);
+    font-weight: 700;
+}
+.md-typeset table:not([class]) tr:nth-child(even) {
+    background: var(--surface-cloud);
+}
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) tr:nth-child(even) {
+    background: #2a2b2b;
+}
+.md-typeset table:not([class]) code { font-size: 0.85em; }
+
+.mermaid { background: transparent !important; color: var(--text-default); }
