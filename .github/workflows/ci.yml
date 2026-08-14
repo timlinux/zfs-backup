@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Tim Sutton / Kartoza
+# SPDX-License-Identifier: MIT
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build, vet and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # The integration-tagged files never run in CI (they need root and a real
+      # ZFS pool), but they must always compile.
+      - name: Vet integration tests
+        run: go vet -tags integration ./...
+
+      - name: Check formatting of test and 2.0 sources
+        run: |
+          # The pre-2.0 sources predate a gofmt pass; enforce formatting on the
+          # files added or rewritten from 2.0 onwards so the drift stops here.
+          FILES="datasets.go doctor.go runner.go snapshots.go scope_tui.go \
+                 datasets_test.go doctor_test.go fake_runner_test.go \
+                 integration_test.go snapshots_test.go"
+          UNFORMATTED=$(gofmt -l $FILES)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "::error::These files need gofmt:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: Test
+        run: go test -v ./...
