@@ -27,6 +27,24 @@ Quick reference for all keyboard shortcuts in Kartoza ZFS Backup Tool.
 | ++n++ | No / Cancel |
 | ++escape++ | Cancel and go back |
 
+## Backup Scope
+
+| Key | Action |
+|-----|--------|
+| ++space++ / ++x++ | Tick or untick the dataset under the cursor |
+| ++a++ | Tick every dataset |
+| ++n++ | Untick every dataset |
+| ++enter++ | Save the scope |
+| ++escape++ / ++q++ | Return to the menu without saving |
+
+## Backup Health Check
+
+| Key | Action |
+|-----|--------|
+| ++arrow-up++ / ++k++, ++arrow-down++ / ++j++ | Scroll the report |
+| ++r++ | Re-run the check |
+| ++escape++ / ++q++ | Return to the menu |
+
 ## During Operations
 
 | Key | Action |

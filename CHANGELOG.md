@@ -9,6 +9,105 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-08-14
+
+### Fixed
+
+- **Snapshot scope now equals replication scope.** Every backup run took a
+  recursive snapshot of the whole source pool (`zfs snapshot -r POOL@...`)
+  while replication and pruning only ever covered a narrower set. The result
+  was that `-Backup` snapshots piled up forever on the pool root, on nested
+  descendants, and on every dataset except `POOL/home` — silently consuming
+  the quota of datasets the user never asked to back up, until writes to `/`
+  started failing with quota-exceeded errors. Snapshots are now taken one
+  dataset at a time over a single canonical list that also drives replication
+  and pruning, and `zfs snapshot -r` is never used.
+- **Pruning covers every dataset, not just `home`.** `pruneOldLocalSnapshots`
+  and `pruneBackupSnapshots` were hardcoded to `POOL/home@`, so every other
+  dataset accumulated snapshots indefinitely. Pruning now iterates the same
+  canonical dataset list as the rest of the run.
+- **Backup-side pruning works again.** It targeted `destPool/home@` while
+  1.6.0 writes to `destPool/<hostname>/home`, so it had been a no-op since the
+  layout migration landed. It now resolves the real destination path.
+- **`--no-sync-snap` is passed to syncoid** wherever zfs-backup created its own
+  snapshot to replicate from. syncoid's `syncoid_<host>_<timestamp>` snapshots
+  are orphaned on the source whenever a send fails, and nothing cleaned them
+  up. The pull-from-remote flow deliberately keeps sync snapshots: it never
+  snapshots the remote itself, so they are its only guaranteed replication base.
+- **Failed datasets are reported, not silently swallowed.** A dataset that
+  fails to replicate now has the snapshot created for it this run destroyed
+  again, is named in the run summary, and makes the run exit non-zero. The
+  backup disk is still exported and powered off safely first.
+- **Only zfs-backup's own snapshots are ever pruned.** Pruning previously
+  matched every snapshot on `POOL/home`, which included sanoid's `autosnap_*`
+  snapshots. It now matches only the `YYYY-MM-DD.HHh-MM-Backup` pattern, and
+  `@blank` is protected everywhere — destroying it breaks NixOS "erase your
+  darlings" installs.
+- **A snapshot is never destroyed before its bookmark is confirmed.** The old
+  prune ignored the result of `zfs bookmark` and destroyed regardless, which
+  could cost the incremental base.
+
+### Added
+
+- **Backup scope.** Choose which datasets a pool backs up. Anything outside the
+  scope is never snapshotted, replicated or pruned. Available as a TUI screen
+  ("Backup Scope", tick boxes with space / `a` / `n` / enter) and as
+  `zfs-backup scope [--pool POOL] [--datasets a,b] [--all]`. Saved per pool to
+  `~/.config/zfs-backup/scope.json`. Unconfigured pools keep backing up every
+  top-level dataset, so nobody's coverage shrinks on upgrade.
+- **`zfs-backup doctor`** and the TUI "Backup Health Check" screen: a read-only
+  report of out-of-scope `-Backup` snapshots, stale `syncoid_*` snapshots, and
+  datasets whose snapshots are eating their quota. Exits 1 when issues exist.
+- **`zfs-backup cleanup-orphans`** to reclaim the space the old behaviour
+  leaked. Dry run by default; `--yes` plus a typed `DESTROY` confirmation to
+  act (`--force` for automation). Refuses to touch `@blank`, held snapshots,
+  snapshots with dependent clones, datasets in scope, and anything not matching
+  zfs-backup's own naming patterns. Destroys one snapshot at a time, never a
+  range expression.
+- **Test suite.** Unit tests run anywhere via a fake command runner and assert
+  the scope invariant directly. ZFS integration tests behind the `integration`
+  build tag create a throwaway file-backed pool (`ZFS_BACKUP_INTEGRATION=1`,
+  root required).
+- **CI.** `go vet`, `gofmt` check on new sources, and `go test ./...` on every
+  push and pull request.
+
+### Changed
+
+- **BREAKING:** zfs-backup no longer snapshots datasets it does not replicate.
+  If you relied on it as a general-purpose recursive snapshotter for your whole
+  pool, it is not one any more, and never safely was — use sanoid for that.
+  Existing `-Backup` snapshots on out-of-scope datasets are left alone; run
+  `zfs-backup doctor` to see them and `zfs-backup cleanup-orphans` to remove
+  them.
+- **BREAKING:** a backup run with any failed dataset now exits non-zero.
+  Automation that treated exit code 0 as "ran" rather than "succeeded" will
+  start reporting these failures.
+- Pruning no longer removes sanoid `autosnap_*` snapshots from `POOL/home`.
+  Retention of those snapshots is sanoid's job and is governed by its own
+  policy.
+- The end-of-run report counts snapshots across the datasets actually backed
+  up, instead of assuming `POOL/home`.
+
+### Migration
+
+No action is required for the fix itself — the next run simply stops creating
+new orphans. To clean up what earlier versions left behind:
+
+```bash
+sudo zfs-backup doctor                  # see what is affected
+sudo zfs-backup cleanup-orphans         # dry run, destroys nothing
+sudo zfs-backup cleanup-orphans --yes   # after reviewing, type DESTROY
+```
+
+To narrow what gets backed up (for example to `home` only):
+
+```bash
+sudo zfs-backup scope --pool NIXROOT --datasets home
+```
+
+Note that space is only reclaimed once *every* snapshot pinning a given block
+is gone, so usage may barely move until the last few are destroyed.
+
 ## [1.6.0] - 2026-06-24
 
 ### Added
@@ -88,7 +187,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   did not yet exist — destinations are now pre-created with
   `zfs create -p`.
 
-[Unreleased]: https://github.com/timlinux/zfs-backup/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/timlinux/zfs-backup/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/timlinux/zfs-backup/compare/v1.6.0...v2.0.0
 [1.6.0]: https://github.com/timlinux/zfs-backup/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/timlinux/zfs-backup/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/timlinux/zfs-backup/compare/v1.3.0...v1.4.0

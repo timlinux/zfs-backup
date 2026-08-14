@@ -26,6 +26,15 @@ Everything you need to drive the TUI day-to-day.
 
     [:octicons-arrow-right-24: Backup operations](backup-operations.md)
 
+-   :material-checkbox-marked-outline:{ .lg .middle } __Backup Scope and Health__
+
+    ---
+
+    Choose which datasets are backed up, check for orphaned snapshots, and
+    reclaim space the pre-2.0 recursive snapshots left behind.
+
+    [:octicons-arrow-right-24: Backup scope and health](backup-scope.md)
+
 -   :material-download:{ .lg .middle } __Restore Files__
 
     ---

@@ -10,7 +10,9 @@ A beautiful TUI (Terminal User Interface) for managing ZFS backups, built with [
 
 ## Features
 
-- **Incremental Backups** - Efficient snapshots of ALL datasets with syncoid integration
+- **Incremental Backups** - Efficient snapshots of your chosen datasets with syncoid integration
+- **Backup Scope** - Pick exactly which datasets are backed up; everything else is never touched
+- **Health Check** - `doctor` finds orphaned snapshots and quota pressure before it bites
 - **Multi-Host Backups** - Back up multiple machines to the same drive with hostname namespacing
 - **Pull Remote Backup** - Pull ZFS snapshots from remote servers via SSH
 - **Push Backup to Remote** - Push local snapshots to a remote backup server via SSH
@@ -129,7 +131,47 @@ sudo zfs-backup
 sudo zfs-backup --backup      # Run incremental backup
 sudo zfs-backup --unmount     # Safely unmount backup drive
 sudo zfs-backup --help        # Show help
+
+# Scope, health and cleanup
+sudo zfs-backup scope                      # Show which datasets are backed up
+sudo zfs-backup scope --datasets home      # Back up only POOL/home
+sudo zfs-backup doctor                     # Read-only health check
+sudo zfs-backup cleanup-orphans            # Dry run: what would be reclaimed
 ```
+
+## What zfs-backup touches
+
+zfs-backup only ever snapshots the datasets it also replicates and prunes.
+Anything outside the backup scope — datasets you excluded, nested child
+datasets, the pool root itself — is never snapshotted, never replicated and
+never pruned.
+
+By default the scope is every top-level dataset of the source pool. Narrow it
+with the **Backup Scope** menu item or `zfs-backup scope --datasets a,b`.
+
+Pruned snapshots become bookmarks, so incremental sends keep working without
+holding the snapshot data. Only snapshots matching zfs-backup's own naming
+pattern (`2026-08-14.10h-00-Backup`) are ever pruned or destroyed — sanoid
+autosnaps, your own snapshots, and `@blank` are left strictly alone.
+
+> **Upgrading from 1.x?** Versions before 2.0.0 took a recursive snapshot of the
+> whole pool but only pruned one dataset, so `-Backup` snapshots accumulated on
+> datasets that were never meant to be backed up. Run `sudo zfs-backup doctor`
+> to see whether you are affected and `sudo zfs-backup cleanup-orphans` to
+> reclaim the space.
+
+### quota vs refquota
+
+This distinction decides how visible a snapshot leak is:
+
+| Property | Counts snapshots? | Symptom when snapshots pile up |
+|----------|-------------------|--------------------------------|
+| `quota` | Yes — dataset plus its snapshots and descendants | The dataset hits its limit and writes fail, even though live data is small |
+| `refquota` | No — referenced (live) data only | Pool free space is silently consumed instead |
+
+If your root dataset uses `quota`, orphaned snapshots will eventually take the
+machine down. `zfs-backup doctor` flags any dataset whose snapshots consume more
+than half its quota.
 
 ## Requirements
 
@@ -146,6 +188,8 @@ sudo zfs-backup --help        # Show help
 | Pull Remote Backup | Pull backup from a remote host via SSH |
 | Push Backup to Remote | Push local snapshots to a remote backup server |
 | Restore Files | Browse snapshots and restore individual files |
+| Backup Scope | Choose which datasets are backed up - anything else is never touched |
+| Backup Health Check | Find orphaned snapshots and datasets whose quota is filling with snapshots |
 | Show zpool info | View pool structure, health, datasets, and snapshots |
 | Pool Maintenance | Start/stop scrubs, monitor pool health |
 | Recover Failed Backup | Fix broken sync state after interruption |
