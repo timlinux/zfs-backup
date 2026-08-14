@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -343,6 +344,10 @@ func (m model) getStatusText() string {
 		return "Resume Available"
 	case stateZpoolInfo:
 		return "Pool Information"
+	case stateScope:
+		return "Backup Scope"
+	case stateDoctor:
+		return "Backup Health"
 	case stateMaintenance:
 		return "Pool Maintenance"
 	case stateQuotaManage:
@@ -382,6 +387,10 @@ func (m model) getHotkeys() string {
 		return "enter/esc return to menu"
 	case stateHelp, stateZpoolInfo:
 		return "enter/esc return to menu"
+	case stateScope:
+		return "↑/k up • ↓/j down • space toggle • a all • n none • enter save • esc return"
+	case stateDoctor:
+		return "scroll up/down • r refresh • esc return"
 	case stateMaintenance:
 		return "s start scrub • x stop scrub • r refresh • esc return"
 	case stateQuotaManage:
@@ -435,6 +444,8 @@ var mainMenuItems = []menuItem{
 	{title: "Show zpool info", description: "Show detailed information about ZFS pool structure, status and health", icon: ""},
 	{title: "Pool Maintenance", description: "Start, stop, or monitor scrub operations for data integrity verification", icon: ""},
 	{title: "Manage Datasets", description: "View/edit quotas, create and delete ZFS datasets", icon: ""},
+	{title: "Backup Scope", description: "Choose which datasets are backed up - anything else is never touched", icon: ""},
+	{title: "Backup Health Check", description: "Find orphaned snapshots and datasets whose quota is filling with snapshots", icon: ""},
 	{title: "Browse Reports", description: "View previous backup reports with timings, sizes, and error details", icon: ""},
 	{title: "Recover Failed Backup", description: "Fix broken sync state when backup was interrupted or snapshot was deleted", icon: ""},
 	{title: "Unmount Backup Disk", description: "Safely export the backup pool and power off the USB drive", icon: ""},
@@ -488,6 +499,18 @@ type model struct {
 	zpoolInfoPool    string           // Selected pool for info display
 	zpoolViewport    viewport.Model   // Scrollable viewport for info
 	zpoolInfoReady   bool             // Is the viewport content ready?
+	// Backup scope editor - which datasets this pool actually backs up
+	scopePool        string          // Pool whose scope is being edited
+	scopeDatasets    []string        // Every direct child of the pool
+	scopeSelected    map[string]bool // Datasets currently in scope
+	scopeMissing     []string        // Configured datasets that no longer exist
+	scopeIndex       int             // Cursor position in the dataset list
+	scopeMessage     string          // Inline validation / confirmation message
+	// Health check
+	doctorPool       string         // Pool being checked
+	doctorViewport   viewport.Model // Scrollable viewport for the report
+	doctorReady      bool           // Is the report ready?
+	doctorProblems   int            // Number of issue groups found
 	// Maintenance
 	maintenancePool    string         // Selected pool for maintenance
 	maintenanceAction  string         // Current maintenance action
@@ -862,22 +885,7 @@ func initialModel() model {
 	// Get available pools (including locked/not-imported ones)
 	pools := getAllPools()
 
-	// Auto-detect source and destination pools:
-	// - Source: first pool that does NOT contain "BACKUP" (case-insensitive)
-	// - Destination: first pool that DOES contain "BACKUP" (case-insensitive)
-	var sourcePool, destPool string
-	for _, p := range pools {
-		upper := strings.ToUpper(p)
-		if strings.Contains(upper, "BACKUP") {
-			if destPool == "" {
-				destPool = p
-			}
-		} else {
-			if sourcePool == "" {
-				sourcePool = p
-			}
-		}
-	}
+	sourcePool, destPool := detectPools(pools)
 
 	return model{
 		state:          stateMenu,
@@ -894,6 +902,22 @@ func initialModel() model {
 
 func (m model) Init() tea.Cmd {
 	return nil
+}
+
+// detectPools picks the default source and destination pools:
+//   - Source: first pool that does NOT contain "BACKUP" (case-insensitive)
+//   - Destination: first pool that DOES contain "BACKUP" (case-insensitive)
+func detectPools(pools []string) (sourcePool, destPool string) {
+	for _, p := range pools {
+		if strings.Contains(strings.ToUpper(p), "BACKUP") {
+			if destPool == "" {
+				destPool = p
+			}
+		} else if sourcePool == "" {
+			sourcePool = p
+		}
+	}
+	return sourcePool, destPool
 }
 
 // getAvailablePools returns a list of currently imported ZFS pools
@@ -1130,6 +1154,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return m, m.preparePoolAccess(selectedPool)
 						}
 
+						// Backup scope and the health check act on the source
+						// pool alone, so there is no destination to pick.
+						if m.operation == "scope" || m.operation == "doctor" {
+							m.selectingPool = false
+							m.scopePool = selectedPool
+							m.doctorPool = selectedPool
+							return m, m.preparePoolAccess(selectedPool)
+						}
+
 						// Now select destination
 						m.selectingSource = false
 						m.poolSelectIndex = 0
@@ -1154,12 +1187,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.selectingPool = false
 
 						// Set up operation-specific pool references
-						if m.operation == "zpoolinfo" {
+						switch m.operation {
+						case "zpoolinfo":
 							m.zpoolInfoPool = selectedPool
-						} else if m.operation == "maintenance" {
+						case "maintenance":
 							m.maintenancePool = selectedPool
-						} else if m.operation == "quotas" {
+						case "quotas":
 							m.quotaPool = selectedPool
+						case "scope":
+							m.scopePool = selectedPool
+						case "doctor":
+							m.doctorPool = selectedPool
 						}
 
 						// Smart pool access: import if needed, skip password if already unlocked
@@ -1313,6 +1351,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "Manage Datasets":
 					m.operation = "quotas"
 					m.startPoolSelection(false)
+					return m, nil
+				case "Backup Scope":
+					m.operation = "scope"
+					m.startPoolSelection(true)
+					return m, nil
+				case "Backup Health Check":
+					m.operation = "doctor"
+					m.startPoolSelection(true)
 					return m, nil
 				case "Browse Reports":
 					m.state = stateReports
@@ -1503,6 +1549,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, cmd
 				}
 			}
+		} else if m.state == stateScope {
+			return m.updateScopeScreen(msg)
+		} else if m.state == stateDoctor {
+			return m.updateDoctorScreen(msg)
 		} else if m.state == stateZpoolInfo {
 			switch msg.String() {
 			case "esc", "q":
@@ -1809,6 +1859,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadZpoolInfo()
 		case "quotas":
 			return m, loadQuotaData(m.quotaPool)
+		case "scope":
+			return m, loadBackupScope(m.scopePool)
+		case "doctor":
+			m.state = stateDoctor
+			m.doctorReady = false
+			return m, tea.Batch(m.spinner.Tick, loadDoctorReport(m.doctorPool))
 		case "maintenance":
 			return m, m.loadMaintenanceStatus()
 		case "backup", "force-backup", "recover", "remote-backup", "push-backup":
@@ -1826,6 +1882,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			newM, cmd = m.startOperation()
 			return newM, cmd
 		}
+
+	case scopeLoadedMsg:
+		if msg.err != nil {
+			m.state = stateResult
+			m.err = msg.err
+			m.message = ""
+			return m, nil
+		}
+		m.state = stateScope
+		m.scopePool = msg.pool
+		m.scopeDatasets = msg.datasets
+		m.scopeSelected = msg.selected
+		m.scopeMissing = msg.missing
+		m.scopeIndex = 0
+		m.scopeMessage = ""
+		return m, nil
+
+	case scopeSavedMsg:
+		if msg.err != nil {
+			m.scopeMessage = "Could not save: " + msg.err.Error()
+			return m, nil
+		}
+		m.scopeMessage = "Saved. Datasets outside the scope will not be snapshotted again."
+		return m, nil
+
+	case doctorLoadedMsg:
+		if msg.err != nil {
+			m.state = stateResult
+			m.err = msg.err
+			m.message = ""
+			return m, nil
+		}
+		m.state = stateDoctor
+		m.doctorPool = msg.pool
+		m.doctorProblems = msg.problems
+		m.doctorViewport = newReportViewport(m.width, m.height, msg.content)
+		m.doctorReady = true
+		return m, nil
 
 	case maintenanceStatusMsg:
 		if msg.err != nil {
@@ -2145,6 +2239,10 @@ func (m model) renderContentNopad(width int) string {
 		content.WriteString(m.renderHelpContent(width))
 	case stateZpoolInfo:
 		content.WriteString(m.renderZpoolInfoContent(width))
+	case stateScope:
+		content.WriteString(m.renderScopeContent(width))
+	case stateDoctor:
+		content.WriteString(m.renderDoctorContent(width))
 	case stateMaintenance:
 		content.WriteString(m.renderMaintenanceContent(width))
 	case stateQuotaManage:
@@ -3958,6 +4056,7 @@ func main() {
 
 func handleCLI() {
 	arg := os.Args[1]
+	rest := os.Args[2:]
 	switch arg {
 	case "--backup", "-b":
 		fmt.Println(statusStyle.Render("Running incremental backup..."))
@@ -3968,6 +4067,12 @@ func handleCLI() {
 	case "--unmount", "-u":
 		fmt.Println(infoStyle.Render("Unmounting backup disk..."))
 		runUnmountSync()
+	case "doctor":
+		os.Exit(handleDoctorCLI(rest))
+	case "cleanup-orphans":
+		os.Exit(handleCleanupCLI(rest))
+	case "scope":
+		os.Exit(handleScopeCLI(rest))
 	case "--version", "-v":
 		fmt.Println(appVersion)
 	case "--help", "-h":
@@ -3977,6 +4082,168 @@ func handleCLI() {
 		fmt.Fprintln(os.Stderr, "Run 'zfs-backup --help' for usage information")
 		os.Exit(1)
 	}
+}
+
+// parseFlags turns "--key value" and "--flag" arguments into a map. Unknown
+// keys are returned as-is so each subcommand can validate its own options.
+func parseFlags(args []string, valueFlags map[string]bool) (map[string]string, error) {
+	parsed := map[string]string{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "--") {
+			return nil, fmt.Errorf("unexpected argument: %s", arg)
+		}
+		key := strings.TrimPrefix(arg, "--")
+		if eq := strings.Index(key, "="); eq >= 0 {
+			parsed[key[:eq]] = key[eq+1:]
+			continue
+		}
+		if valueFlags[key] {
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--%s needs a value", key)
+			}
+			parsed[key] = args[i+1]
+			i++
+			continue
+		}
+		parsed[key] = "true"
+	}
+	return parsed, nil
+}
+
+// resolveCLIPool returns the pool a subcommand should act on: the --pool value
+// if given, otherwise the auto-detected source pool.
+func resolveCLIPool(flags map[string]string) (string, error) {
+	if pool, ok := flags["pool"]; ok && pool != "" {
+		return pool, nil
+	}
+	source, _ := detectPools(getAvailablePools())
+	if source == "" {
+		return "", fmt.Errorf("could not detect a source pool - pass --pool POOL")
+	}
+	return source, nil
+}
+
+// handleDoctorCLI runs the read-only health check.
+func handleDoctorCLI(args []string) int {
+	flags, err := parseFlags(args, map[string]bool{"pool": true})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		return 1
+	}
+	pool, err := resolveCLIPool(flags)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		return 1
+	}
+	return runDoctor(context.Background(), defaultRunner, pool)
+}
+
+// handleCleanupCLI runs the orphan cleanup. Dry run is the default.
+func handleCleanupCLI(args []string) int {
+	flags, err := parseFlags(args, map[string]bool{"pool": true, "dataset": true})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		return 1
+	}
+	pool, err := resolveCLIPool(flags)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		return 1
+	}
+
+	opts := cleanupOptions{
+		Pool:    pool,
+		Dataset: flags["dataset"],
+		Confirm: flags["yes"] == "true",
+		Force:   flags["force"] == "true",
+	}
+	return runCleanupOrphans(context.Background(), defaultRunner, opts, confirmDestroy)
+}
+
+// confirmDestroy asks the operator to type DESTROY before anything is removed.
+func confirmDestroy(prompt string) bool {
+	fmt.Print(prompt)
+	reader := bufio.NewReader(os.Stdin)
+	answer, err := reader.ReadString('\n')
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(answer) == "DESTROY"
+}
+
+// handleScopeCLI shows or sets which datasets of a pool are backed up.
+func handleScopeCLI(args []string) int {
+	flags, err := parseFlags(args, map[string]bool{"pool": true, "datasets": true})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		return 1
+	}
+	pool, err := resolveCLIPool(flags)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		return 1
+	}
+
+	if list, ok := flags["datasets"]; ok {
+		var wanted []string
+		for _, ds := range strings.Split(list, ",") {
+			if trimmed := strings.TrimSpace(ds); trimmed != "" {
+				wanted = append(wanted, trimmed)
+			}
+		}
+		if err := SetPoolScope(pool, wanted); err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+			return 1
+		}
+	} else if flags["all"] == "true" {
+		if err := SetPoolScope(pool, nil); err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+			return 1
+		}
+	}
+
+	available, err := getChildDatasets(pool)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		return 1
+	}
+	selected, missing, err := resolveBackupDatasets(pool)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		return 1
+	}
+
+	inScope := map[string]bool{}
+	for _, ds := range selected {
+		inScope[ds] = true
+	}
+
+	fmt.Println()
+	fmt.Println(titleStyle.Render("Backup scope for " + pool))
+	fmt.Println(interstitialStyle.Render(strings.Repeat("─", 50)))
+	fmt.Println()
+	for _, ds := range available {
+		mark := "  "
+		label := infoStyle.Render(ds + " (not backed up)")
+		if inScope[ds] {
+			mark = "✓ "
+			label = statusStyle.Render(ds)
+		}
+		fmt.Printf("  %s%s\n", mark, label)
+	}
+	for _, ds := range missing {
+		fmt.Println(warningStyle.Render(fmt.Sprintf("  ! %s (configured but no longer exists)", ds)))
+	}
+	fmt.Println()
+	fmt.Println(infoStyle.Render(
+		"Datasets outside the scope are never snapshotted, replicated or pruned."))
+	fmt.Println(infoStyle.Render(
+		"Change it with: sudo zfs-backup scope --pool " + pool + " --datasets home,atuin"))
+	fmt.Println(infoStyle.Render(
+		"Back up everything again with: sudo zfs-backup scope --pool " + pool + " --all"))
+	fmt.Println()
+	return 0
 }
 
 func showCLIHelp() {
@@ -3989,20 +4256,43 @@ func showCLIHelp() {
 	fmt.Println(interstitialStyle.Render(strings.Repeat("─", 50)))
 	fmt.Println()
 
-	help := `Usage: zfs-backup [OPTIONS]
+	help := `Usage: zfs-backup [OPTIONS] | zfs-backup <COMMAND> [FLAGS]
 
 Options:
   -b, --backup          Run incremental backup
   -f, --force-backup    Force backup (destructive)
   -u, --unmount         Unmount and power off backup disk
+  -v, --version         Show the version
   -h, --help            Show this help message
+
+Commands:
+  scope                 Show or set which datasets are backed up
+    --pool POOL         Pool to inspect (default: auto-detected source pool)
+    --datasets a,b      Restrict the backup to these datasets
+    --all               Back up every top-level dataset again
+
+  doctor                Read-only health check: orphaned snapshots and
+                        datasets whose quota is being eaten by snapshots
+    --pool POOL         Pool to check (default: auto-detected source pool)
+
+  cleanup-orphans       Remove snapshots left behind by older versions
+    --pool POOL         Pool to clean (default: auto-detected source pool)
+    --dataset DATASET   Restrict cleanup to one dataset
+    --yes               Actually destroy (dry run is the default)
+    --force             Skip the typed confirmation prompt
 
 If no options are provided, an interactive TUI menu will be displayed.
 
 Examples:
-  sudo zfs-backup              # Show interactive menu
-  sudo zfs-backup --backup     # Run incremental backup
-  sudo zfs-backup --unmount    # Unmount backup disk
+  sudo zfs-backup                                   # Show interactive menu
+  sudo zfs-backup --backup                          # Run incremental backup
+  sudo zfs-backup scope --datasets home             # Only back up POOL/home
+  sudo zfs-backup doctor                            # Check for orphans
+  sudo zfs-backup cleanup-orphans                   # Dry run the cleanup
+  sudo zfs-backup cleanup-orphans --yes             # Destroy, after confirming
+
+Snapshot scope: zfs-backup only ever snapshots the datasets it also
+replicates and prunes. Datasets outside the scope are never touched.
 
 Note: If you have ZFS delegation configured for your user, you can omit sudo.`
 
