@@ -38,6 +38,7 @@ PROMPT.log
 claude.sh
 claude.out
 issue.txt
+pr-body.md
 
 # Local docs build (venv + generated site)
 .venv-docs/
