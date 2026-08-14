@@ -161,6 +161,14 @@ type BackupState struct {
 	CompletedStages map[BackupStage]bool  `json:"completed_stages"`
 	CurrentStage   BackupStage            `json:"current_stage"`
 	SnapshotName   string                 `json:"snapshot_name,omitempty"`
+	// Datasets is the canonical dataset list this run operates on. Every
+	// phase - snapshot, replicate, prune - uses this one list.
+	Datasets       []string               `json:"datasets,omitempty"`
+	// SnapshotNames are the snapshots this run created, so a failed run can
+	// destroy its own residue instead of orphaning it.
+	SnapshotNames  []string               `json:"snapshot_names,omitempty"`
+	// FailedDatasets are datasets whose replication failed this run.
+	FailedDatasets []string               `json:"failed_datasets,omitempty"`
 	Cancelled      bool                   `json:"cancelled"`
 	LastUpdate     time.Time              `json:"last_update"`
 	StageTimings   map[BackupStage]time.Duration `json:"stage_timings"` // Historical timings
