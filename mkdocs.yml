@@ -153,6 +153,7 @@ nav:
     - user-guide/index.md
     - Getting Started: user-guide/getting-started.md
     - Backup Operations: user-guide/backup-operations.md
+    - Backup Scope and Health: user-guide/backup-scope.md
     - Restore Files: user-guide/restore-files.md
     - Pool Information: user-guide/pool-info.md
     - Pool Maintenance: user-guide/pool-maintenance.md

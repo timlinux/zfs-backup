@@ -275,6 +275,18 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 
 	output.WriteString(fmt.Sprintf("Backing up %s → %s\n\n", sourcePool, destPool))
 
+	// Derive the canonical dataset list once, up front. Snapshot, replication
+	// and prune all run over this one list so no phase can touch a dataset
+	// another phase ignores - see the snapshot scope invariant in datasets.go.
+	datasets, missingDatasets, err := resolveBackupDatasets(sourcePool)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve backup scope: %w", err)
+	}
+	if len(datasets) == 0 {
+		return "", fmt.Errorf("no datasets in scope for %s - nothing to back up", sourcePool)
+	}
+	output.WriteString(describeScope(sourcePool, datasets, missingDatasets) + "\n\n")
+
 	// Initialize or load backup state
 	var state *BackupState
 	if resumeFrom != nil {
@@ -283,6 +295,8 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 	} else {
 		state = NewBackupState("backup")
 	}
+	state.Datasets = datasets
+	state.FailedDatasets = nil
 
 	// Save initial state
 	if err := SaveBackupState(state); err != nil {
@@ -341,7 +355,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 	}
 
 	// Stage 1: Import pool
-	err := executeStage(StageImportPool, fmt.Sprintf("[POOL]Importing %s pool", destPool), func() error {
+	err = executeStage(StageImportPool, fmt.Sprintf("[POOL]Importing %s pool", destPool), func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 IMPORT POOL\n")
 		output.WriteString("   ZFS pools on external drives must be 'imported' before use.\n")
@@ -396,25 +410,30 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 		return output.String(), err
 	}
 
-	// Stage 3: Create recursive snapshot (all datasets)
+	// Stage 3: Snapshot the datasets in scope - one per dataset, never -r
 	err = executeStage(StageCreateSnapshot, "[SNAP]Creating snapshot", func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 CREATE SNAPSHOT\n")
 		output.WriteString("   A ZFS snapshot captures the exact state of your data at this\n")
 		output.WriteString("   moment. Snapshots are instant and space-efficient - they only\n")
 		output.WriteString("   store the differences (deltas) from the live filesystem.\n")
-		output.WriteString("   Using -r to snapshot all datasets under the source pool.\n")
+		output.WriteString("   Only the datasets in scope are snapshotted, so nothing is\n")
+		output.WriteString("   snapshotted that this run will not also replicate and prune.\n")
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
-		timestamp := time.Now().Format("2006-01-02.15h-04")
-		snapshotTag := fmt.Sprintf("%s-Backup", timestamp)
-		snapshotName := fmt.Sprintf("%s@%s", sourcePool, snapshotTag)
-		state.SnapshotName = snapshotName
+		snapshotTag := snapshotTagForTime(time.Now())
+		state.SnapshotName = fmt.Sprintf("%s@%s", sourcePool, snapshotTag)
 		_ = SaveBackupState(state)
 
-		output.WriteString(fmt.Sprintf("Creating recursive snapshot: %s\n", snapshotName))
-		if err := runCommandWithContext(ctx, "zfs", "snapshot", "-r", snapshotName); err != nil {
-			return fmt.Errorf("failed to create snapshot: %w", err)
+		created, err := createDatasetSnapshots(ctx, defaultRunner, sourcePool, datasets, snapshotTag)
+		if err != nil {
+			return err
+		}
+		state.SnapshotNames = created
+		_ = SaveBackupState(state)
+
+		for _, name := range created {
+			output.WriteString(fmt.Sprintf("Created snapshot: %s\n", name))
 		}
 		return nil
 	})
@@ -422,7 +441,11 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 		return output.String(), err
 	}
 
-	// Stage 4: Sync data (all datasets)
+	// Datasets whose replication failed. Collected during the sync stage and
+	// reported at the end of the run so the process exits non-zero.
+	var failedDatasets []string
+
+	// Stage 4: Sync the datasets in scope
 	err = executeStage(StageSyncData, "📨 Syncing data to backup disk", func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 INCREMENTAL SYNC (using syncoid)\n")
@@ -434,18 +457,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 
 		hostname := getLocalHostname()
 
-		// Get all child datasets of the source pool
-		datasets, err := getChildDatasets(sourcePool)
-		if err != nil {
-			return fmt.Errorf("failed to list source datasets: %w", err)
-		}
-
-		if len(datasets) == 0 {
-			output.WriteString("Warning: No child datasets found, nothing to sync\n")
-			return nil
-		}
-
-		output.WriteString(fmt.Sprintf("Found %d dataset(s) to sync: %s\n\n", len(datasets), strings.Join(datasets, ", ")))
+		output.WriteString(fmt.Sprintf("Syncing %d dataset(s): %s\n\n", len(datasets), strings.Join(datasets, ", ")))
 
 		// Migrate any legacy flat-layout datasets into the hostname namespace
 		// before anything else writes to the destination pool.
@@ -479,6 +491,8 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 				dsProgress[i].Duration = time.Since(dsStart)
 				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
 				sendDatasetProgress(progressChan, "Syncing data to backup disk", currentStage-1, totalStages, state, dsProgress, i)
+				failedDatasets = append(failedDatasets, ds)
+				output.WriteString(fmt.Sprintf("Warning:Could not create %s: %v\n", syncDest, err))
 				continue
 			}
 
@@ -499,18 +513,24 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 					sendDatasetProgress(progressChan, fmt.Sprintf("Syncing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 				},
 				func() error {
-					return runSyncoidWithTimeout(ctx, syncoidTimeout, "--create-bookmark", syncSrc, syncDest)
+					return runSyncoidWithTimeout(ctx, syncoidTimeout, syncoidBaseArgs(syncSrc, syncDest)...)
 				},
 			)
 			if syncErr != nil {
 				dsProgress[i].Status = DatasetError
 				dsProgress[i].ErrorMsg = syncErr.Error()
+				failedDatasets = append(failedDatasets, ds)
+				output.WriteString(fmt.Sprintf("Warning:Sync of %s failed: %v\n", ds, syncErr))
 			} else {
 				dsProgress[i].Status = DatasetDone
 			}
 			dsProgress[i].Duration = time.Since(dsStart)
 			sendDatasetProgress(progressChan, "Syncing data to backup disk", currentStage-1, totalStages, state, dsProgress, i)
 		}
+
+		// A dataset that failed to replicate must not keep the snapshot this
+		// run created for it: nothing downstream would ever prune it.
+		discardSnapshotsForFailedDatasets(ctx, defaultRunner, sourcePool, state, failedDatasets, &output)
 		return nil
 	})
 	if err != nil {
@@ -528,9 +548,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 		output.WriteString("Creating bookmarks and pruning old snapshots...\n")
-		if err := pruneOldLocalSnapshots(sourcePool); err != nil {
-			output.WriteString(fmt.Sprintf("Warning:Warning: %v\n", err))
-		}
+		writePruneResult(&output, pruneLocalSnapshots(ctx, defaultRunner, sourcePool, datasets, localBackupSnapshotsKept))
 		return nil
 	})
 	if err != nil {
@@ -548,9 +566,8 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 		output.WriteString("Keeping monthly archives...\n")
-		if err := pruneBackupSnapshots(destPool); err != nil {
-			output.WriteString(fmt.Sprintf("Warning:Warning: %v\n", err))
-		}
+		destinations := backupDestinations(destPool, getLocalHostname(), datasets)
+		writePruneResult(&output, pruneDestinationSnapshots(ctx, defaultRunner, destinations, time.Now()))
 		return nil
 	})
 	if err != nil {
@@ -568,7 +585,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 		// Generate report
-		report, err := generateBackupReport(sourcePool, destPool)
+		report, err := generateBackupReport(sourcePool, destPool, datasets)
 		if err != nil {
 			output.WriteString(fmt.Sprintf("Warning:Warning: failed to generate report: %v\n", err))
 		} else {
@@ -598,6 +615,15 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 		return output.String(), err
 	}
 
+	// The disk has been exported safely, so report the outcome honestly: a run
+	// that could not replicate every dataset is not a successful run.
+	if len(failedDatasets) > 0 {
+		output.WriteString(fmt.Sprintf(
+			"\nWarning:%d dataset(s) failed to replicate: %s\n",
+			len(failedDatasets), strings.Join(failedDatasets, ", ")))
+		return output.String(), fmt.Errorf("backup incomplete: %s failed to replicate", strings.Join(failedDatasets, ", "))
+	}
+
 	output.WriteString("\n[OK]Backup completed successfully!")
 	return output.String(), nil
 }
@@ -615,6 +641,16 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 
 	output.WriteString(fmt.Sprintf("Force backing up %s → %s\n\n", sourcePool, destPool))
 
+	// One canonical dataset list for every phase - see datasets.go.
+	datasets, missingDatasets, err := resolveBackupDatasets(sourcePool)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve backup scope: %w", err)
+	}
+	if len(datasets) == 0 {
+		return "", fmt.Errorf("no datasets in scope for %s - nothing to back up", sourcePool)
+	}
+	output.WriteString(describeScope(sourcePool, datasets, missingDatasets) + "\n\n")
+
 	// Initialize or load backup state
 	var state *BackupState
 	if resumeFrom != nil {
@@ -623,6 +659,8 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 	} else {
 		state = NewBackupState("force-backup")
 	}
+	state.Datasets = datasets
+	state.FailedDatasets = nil
 
 	// Save initial state
 	if err := SaveBackupState(state); err != nil {
@@ -681,7 +719,7 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 	}
 
 	// Stage 1: Import pool
-	err := executeStage(StageImportPool, fmt.Sprintf("[POOL]Importing %s pool", destPool), func() error {
+	err = executeStage(StageImportPool, fmt.Sprintf("[POOL]Importing %s pool", destPool), func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 IMPORT POOL (Force Backup)\n")
 		output.WriteString("   Importing the external backup pool to make it available.\n")
@@ -715,22 +753,26 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 		return output.String(), err
 	}
 
-	// Stage 3: Create recursive snapshot
+	// Stage 3: Snapshot the datasets in scope - one per dataset, never -r
 	err = executeStage(StageCreateSnapshot, "[SNAP]Creating snapshot", func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 CREATE SNAPSHOT\n")
-		output.WriteString("   Creating recursive snapshot of all local datasets.\n")
+		output.WriteString("   Snapshotting only the datasets in scope for this backup.\n")
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
-		timestamp := time.Now().Format("2006-01-02.15h-04")
-		snapshotTag := fmt.Sprintf("%s-Backup", timestamp)
-		snapshotName := fmt.Sprintf("%s@%s", sourcePool, snapshotTag)
-		state.SnapshotName = snapshotName
+		snapshotTag := snapshotTagForTime(time.Now())
+		state.SnapshotName = fmt.Sprintf("%s@%s", sourcePool, snapshotTag)
 		_ = SaveBackupState(state)
 
-		output.WriteString(fmt.Sprintf("Creating recursive snapshot: %s\n", snapshotName))
-		if err := runCommandWithContext(ctx, "zfs", "snapshot", "-r", snapshotName); err != nil {
-			return fmt.Errorf("failed to create snapshot: %w", err)
+		created, err := createDatasetSnapshots(ctx, defaultRunner, sourcePool, datasets, snapshotTag)
+		if err != nil {
+			return err
+		}
+		state.SnapshotNames = created
+		_ = SaveBackupState(state)
+
+		for _, name := range created {
+			output.WriteString(fmt.Sprintf("Created snapshot: %s\n", name))
 		}
 		return nil
 	})
@@ -738,7 +780,10 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 		return output.String(), err
 	}
 
-	// Stage 4: Force sync data (all datasets)
+	// Datasets whose replication failed, reported at the end of the run.
+	var failedDatasets []string
+
+	// Stage 4: Force sync the datasets in scope
 	err = executeStage(StageSyncData, "📨 Force syncing to backup disk", func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 FORCE SYNC (DESTRUCTIVE)\n")
@@ -749,17 +794,7 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 
 		hostname := getLocalHostname()
 
-		datasets, err := getChildDatasets(sourcePool)
-		if err != nil {
-			return fmt.Errorf("failed to list source datasets: %w", err)
-		}
-
-		if len(datasets) == 0 {
-			output.WriteString("Warning: No child datasets found, nothing to sync\n")
-			return nil
-		}
-
-		output.WriteString(fmt.Sprintf("Found %d dataset(s) to force sync: %s\n\n", len(datasets), strings.Join(datasets, ", ")))
+		output.WriteString(fmt.Sprintf("Force syncing %d dataset(s): %s\n\n", len(datasets), strings.Join(datasets, ", ")))
 
 		if err := migrateLegacyDestinationLayout(ctx, destPool, hostname, datasets, &output); err != nil {
 			return err
@@ -788,6 +823,8 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 				dsProgress[i].Duration = time.Since(dsStart)
 				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
 				sendDatasetProgress(progressChan, "Force syncing to backup disk", currentStage-1, totalStages, state, dsProgress, i)
+				failedDatasets = append(failedDatasets, ds)
+				output.WriteString(fmt.Sprintf("Warning:Could not create %s: %v\n", syncDest, err))
 				continue
 			}
 
@@ -808,18 +845,22 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 					sendDatasetProgress(progressChan, fmt.Sprintf("Force syncing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 				},
 				func() error {
-					return runSyncoidWithTimeout(ctx, syncoidTimeout, "--force-delete", syncSrc, syncDest)
+					return runSyncoidWithTimeout(ctx, syncoidTimeout, syncoidBaseArgs(syncSrc, syncDest, "--force-delete")...)
 				},
 			)
 			if syncErr != nil {
 				dsProgress[i].Status = DatasetError
 				dsProgress[i].ErrorMsg = syncErr.Error()
+				failedDatasets = append(failedDatasets, ds)
+				output.WriteString(fmt.Sprintf("Warning:Force sync of %s failed: %v\n", ds, syncErr))
 			} else {
 				dsProgress[i].Status = DatasetDone
 			}
 			dsProgress[i].Duration = time.Since(dsStart)
 			sendDatasetProgress(progressChan, "Force syncing to backup disk", currentStage-1, totalStages, state, dsProgress, i)
 		}
+
+		discardSnapshotsForFailedDatasets(ctx, defaultRunner, sourcePool, state, failedDatasets, &output)
 		return nil
 	})
 	if err != nil {
@@ -844,6 +885,13 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 	})
 	if err != nil {
 		return output.String(), err
+	}
+
+	if len(failedDatasets) > 0 {
+		output.WriteString(fmt.Sprintf(
+			"\nWarning:%d dataset(s) failed to replicate: %s\n",
+			len(failedDatasets), strings.Join(failedDatasets, ", ")))
+		return output.String(), fmt.Errorf("force backup incomplete: %s failed to replicate", strings.Join(failedDatasets, ", "))
 	}
 
 	output.WriteString("\n[OK]Force backup completed successfully!")
@@ -1348,6 +1396,9 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 		return output.String(), err
 	}
 
+	// Datasets whose replication failed, reported at the end of the run.
+	var failedDatasets []string
+
 	// Stage 4: Remote sync via syncoid (all datasets)
 	err = executeStage(StageSyncData, "Syncing data from remote host", func() error {
 		output.WriteString("-----------------------------------------------------------\n")
@@ -1417,6 +1468,8 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 				dsProgress[i].Duration = time.Since(dsStart)
 				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
 				sendDatasetProgress(progressChan, "Syncing data from remote host", currentStage-1, totalStages, state, dsProgress, i)
+				failedDatasets = append(failedDatasets, ds)
+				output.WriteString(fmt.Sprintf("Warning:Could not create %s: %v\n", syncDest, err))
 				continue
 			}
 
@@ -1437,12 +1490,18 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 					sendDatasetProgress(progressChan, fmt.Sprintf("Syncing %s", suffix), currentStage-1, totalStages, state, dsProgress, i)
 				},
 				func() error {
+					// Deliberately NOT --no-sync-snap here: on a pull we never
+					// snapshot the remote ourselves, so syncoid's own sync
+					// snapshot is the only guaranteed replication base for a
+					// remote that has no snapshot policy of its own.
 					return runSyncoidWithTimeout(ctx, syncoidTimeout, "--create-bookmark", syncSrc, syncDest)
 				},
 			)
 			if syncErr != nil {
 				dsProgress[i].Status = DatasetError
 				dsProgress[i].ErrorMsg = syncErr.Error()
+				failedDatasets = append(failedDatasets, ds)
+				output.WriteString(fmt.Sprintf("Warning:Sync of %s failed: %v\n", ds, syncErr))
 			} else {
 				dsProgress[i].Status = DatasetDone
 			}
@@ -1484,6 +1543,13 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 		return output.String(), err
 	}
 
+	if len(failedDatasets) > 0 {
+		output.WriteString(fmt.Sprintf(
+			"\nWarning: %d dataset(s) failed to replicate: %s\n",
+			len(failedDatasets), strings.Join(failedDatasets, ", ")))
+		return output.String(), fmt.Errorf("remote backup incomplete: %s failed to replicate", strings.Join(failedDatasets, ", "))
+	}
+
 	output.WriteString("\n[OK] Remote backup completed successfully!")
 	return output.String(), nil
 }
@@ -1505,6 +1571,16 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 
 	output.WriteString(fmt.Sprintf("Push backup: %s -> %s:%s/%s/\n\n", sourcePool, remoteHost, remoteDestPool, hostname))
 
+	// One canonical dataset list for every phase - see datasets.go.
+	datasets, missingDatasets, err := resolveBackupDatasets(sourcePool)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve backup scope: %w", err)
+	}
+	if len(datasets) == 0 {
+		return "", fmt.Errorf("no datasets in scope for %s - nothing to back up", sourcePool)
+	}
+	output.WriteString(describeScope(sourcePool, datasets, missingDatasets) + "\n\n")
+
 	var state *BackupState
 	if resumeFrom != nil {
 		state = resumeFrom
@@ -1512,6 +1588,8 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 	} else {
 		state = NewBackupState("push-backup")
 	}
+	state.Datasets = datasets
+	state.FailedDatasets = nil
 
 	if err := SaveBackupState(state); err != nil {
 		return "", fmt.Errorf("failed to save state: %w", err)
@@ -1564,22 +1642,26 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 		return nil
 	}
 
-	// Stage 1: Create recursive snapshot locally
-	err := executeStage(StageCreateSnapshot, "Creating local snapshot", func() error {
+	// Stage 1: Snapshot the datasets in scope - one per dataset, never -r
+	err = executeStage(StageCreateSnapshot, "Creating local snapshot", func() error {
 		output.WriteString("-----------------------------------------------------------\n")
 		output.WriteString("CREATE SNAPSHOT\n")
-		output.WriteString("   Creating recursive snapshot of all local datasets.\n")
+		output.WriteString("   Snapshotting only the datasets in scope for this backup.\n")
 		output.WriteString("-----------------------------------------------------------\n\n")
 
-		timestamp := time.Now().Format("2006-01-02.15h-04")
-		snapshotTag := fmt.Sprintf("%s-Backup", timestamp)
-		snapshotName := fmt.Sprintf("%s@%s", sourcePool, snapshotTag)
-		state.SnapshotName = snapshotName
+		snapshotTag := snapshotTagForTime(time.Now())
+		state.SnapshotName = fmt.Sprintf("%s@%s", sourcePool, snapshotTag)
 		_ = SaveBackupState(state)
 
-		output.WriteString(fmt.Sprintf("Creating recursive snapshot: %s\n", snapshotName))
-		if err := runCommandWithContext(ctx, "zfs", "snapshot", "-r", snapshotName); err != nil {
-			return fmt.Errorf("failed to create snapshot: %w", err)
+		created, err := createDatasetSnapshots(ctx, defaultRunner, sourcePool, datasets, snapshotTag)
+		if err != nil {
+			return err
+		}
+		state.SnapshotNames = created
+		_ = SaveBackupState(state)
+
+		for _, name := range created {
+			output.WriteString(fmt.Sprintf("Created snapshot: %s\n", name))
 		}
 		return nil
 	})
@@ -1587,23 +1669,16 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 		return output.String(), err
 	}
 
-	// Stage 2: Push all datasets to remote via syncoid
+	// Datasets whose replication failed, reported at the end of the run.
+	var failedDatasets []string
+
+	// Stage 2: Push the datasets in scope to the remote via syncoid
 	err = executeStage(StageSyncData, "Pushing data to remote host", func() error {
 		output.WriteString("-----------------------------------------------------------\n")
 		output.WriteString("PUSH SYNC (using syncoid via SSH)\n")
 		output.WriteString("   Pushing local data to remote backup server over SSH.\n")
 		output.WriteString("   Datasets are namespaced by local hostname on the remote.\n")
 		output.WriteString("-----------------------------------------------------------\n\n")
-
-		datasets, err := getChildDatasets(sourcePool)
-		if err != nil {
-			return fmt.Errorf("failed to list source datasets: %w", err)
-		}
-
-		if len(datasets) == 0 {
-			output.WriteString("Warning: No child datasets found, nothing to sync\n")
-			return nil
-		}
 
 		output.WriteString(fmt.Sprintf("Pushing %d dataset(s) to %s\n\n", len(datasets), remoteHost))
 
@@ -1631,6 +1706,8 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 				dsProgress[i].Duration = time.Since(dsStart)
 				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
 				sendDatasetProgress(progressChan, "Pushing data to remote host", currentStage-1, totalStages, state, dsProgress, i)
+				failedDatasets = append(failedDatasets, ds)
+				output.WriteString(fmt.Sprintf("Warning: could not create %s: %v\n", remoteDatasetPath, err))
 				continue
 			}
 
@@ -1642,18 +1719,22 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 					sendDatasetProgress(progressChan, fmt.Sprintf("Pushing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 				},
 				func() error {
-					return runSyncoidWithTimeout(ctx, syncoidTimeout, "--create-bookmark", syncSrc, remoteDest)
+					return runSyncoidWithTimeout(ctx, syncoidTimeout, syncoidBaseArgs(syncSrc, remoteDest)...)
 				},
 			)
 			if syncErr != nil {
 				dsProgress[i].Status = DatasetError
 				dsProgress[i].ErrorMsg = syncErr.Error()
+				failedDatasets = append(failedDatasets, ds)
+				output.WriteString(fmt.Sprintf("Warning: push of %s failed: %v\n", ds, syncErr))
 			} else {
 				dsProgress[i].Status = DatasetDone
 			}
 			dsProgress[i].Duration = time.Since(dsStart)
 			sendDatasetProgress(progressChan, "Pushing data to remote host", currentStage-1, totalStages, state, dsProgress, i)
 		}
+
+		discardSnapshotsForFailedDatasets(ctx, defaultRunner, sourcePool, state, failedDatasets, &output)
 		return nil
 	})
 	if err != nil {
@@ -1667,13 +1748,18 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 		output.WriteString("   Cleaning up old local snapshots to save space.\n")
 		output.WriteString("-----------------------------------------------------------\n\n")
 
-		if err := pruneOldLocalSnapshots(sourcePool); err != nil {
-			output.WriteString(fmt.Sprintf("Warning: %v\n", err))
-		}
+		writePruneResult(&output, pruneLocalSnapshots(ctx, defaultRunner, sourcePool, datasets, localBackupSnapshotsKept))
 		return nil
 	})
 	if err != nil {
 		return output.String(), err
+	}
+
+	if len(failedDatasets) > 0 {
+		output.WriteString(fmt.Sprintf(
+			"\nWarning: %d dataset(s) failed to replicate: %s\n",
+			len(failedDatasets), strings.Join(failedDatasets, ", ")))
+		return output.String(), fmt.Errorf("push backup incomplete: %s failed to replicate", strings.Join(failedDatasets, ", "))
 	}
 
 	output.WriteString("\n[OK] Push backup completed successfully!")
@@ -2204,117 +2290,146 @@ func getBackupDevice(poolName string) (string, error) {
 	return "", fmt.Errorf("could not detect backup device")
 }
 
-func pruneOldLocalSnapshots(sourcePool string) error {
-	// Get snapshots older than 7 days
-	output, err := runCommandOutput("zfs", "list", "-H", "-o", "name", "-t", "snapshot", "-S", "creation")
-	if err != nil {
-		return err
-	}
-
-	prefix := sourcePool + "/home@"
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	var localSnapshots []string
-	for _, line := range lines {
-		if strings.HasPrefix(line, prefix) {
-			localSnapshots = append(localSnapshots, line)
-		}
-	}
-
-	// Keep first 7, bookmark and delete the rest
-	if len(localSnapshots) > 7 {
-		for _, snap := range localSnapshots[7:] {
-			bookmark := strings.Replace(snap, "@", "#", 1)
-			_ = runCommand("zfs", "bookmark", snap, bookmark)
-			_ = runCommand("zfs", "destroy", snap)
-		}
-	}
-
-	return nil
+// syncoidBaseArgs builds the syncoid arguments shared by every sync site.
+//
+// --no-sync-snap is essential: zfs-backup already creates its own named
+// snapshot to serve as the replication base, and syncoid's own
+// syncoid_<host>_<timestamp> snapshots are orphaned on the source whenever a
+// send fails. Without this flag every failed send leaves debris that nothing
+// ever cleans up.
+func syncoidBaseArgs(src, dest string, extra ...string) []string {
+	args := []string{"--no-sync-snap", "--create-bookmark"}
+	args = append(args, extra...)
+	return append(args, src, dest)
 }
 
-func pruneBackupSnapshots(destPool string) error {
-	now := time.Now()
-	keepMonths := []string{
-		now.Format("2006-01"),
-		now.AddDate(0, -1, 0).Format("2006-01"),
-		now.AddDate(0, -2, 0).Format("2006-01"),
+// backupDestinations maps dataset suffixes to their destination datasets on
+// the backup pool, honouring the hostname-namespaced layout and any legacy
+// flat layout still in place.
+func backupDestinations(destPool, hostname string, datasets []string) []string {
+	destinations := make([]string, 0, len(datasets))
+	for _, ds := range datasets {
+		destinations = append(destinations, resolveBackupDestination(destPool, hostname, ds))
+	}
+	return destinations
+}
+
+// discardSnapshotsForFailedDatasets destroys the snapshots this run created for
+// datasets whose replication failed, so a failed run leaves no residue behind.
+func discardSnapshotsForFailedDatasets(ctx context.Context, r commandRunner, sourcePool string, state *BackupState, failed []string, output *strings.Builder) {
+	if len(failed) == 0 || len(state.SnapshotNames) == 0 {
+		return
 	}
 
-	output, err := runCommandOutput("zfs", "list", "-H", "-o", "name", "-t", "snapshot")
-	if err != nil {
-		return err
+	stale := snapshotsForDatasets(state.SnapshotNames, qualifyDatasets(sourcePool, failed))
+	if len(stale) == 0 {
+		return
 	}
 
-	prefix := destPool + "/home@"
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	for _, line := range lines {
-		if !strings.HasPrefix(line, prefix) {
-			continue
-		}
+	output.WriteString(fmt.Sprintf(
+		"Cleaning up %d snapshot(s) created for dataset(s) that failed to replicate...\n", len(stale)))
+	if notDestroyed := destroySnapshots(ctx, r, stale); len(notDestroyed) > 0 {
+		output.WriteString(fmt.Sprintf(
+			"Warning:Could not remove %s - run 'zfs-backup doctor' to review\n", strings.Join(notDestroyed, ", ")))
+	}
 
-		shouldKeep := false
-		for _, month := range keepMonths {
-			if strings.Contains(line, month) {
-				shouldKeep = true
+	kept := make([]string, 0, len(state.SnapshotNames))
+	for _, name := range state.SnapshotNames {
+		stillStale := false
+		for _, s := range stale {
+			if s == name {
+				stillStale = true
 				break
 			}
 		}
-
-		if !shouldKeep {
-			bookmark := strings.Replace(line, "@", "#", 1)
-			_ = runCommand("zfs", "bookmark", line, bookmark)
-			_ = runCommand("zfs", "destroy", line)
+		if !stillStale {
+			kept = append(kept, name)
 		}
 	}
+	state.SnapshotNames = kept
+	state.FailedDatasets = failed
+	_ = SaveBackupState(state)
+}
 
-	return nil
+// writePruneResult renders a prune pass into the run log.
+func writePruneResult(output *strings.Builder, result pruneResult) {
+	if len(result.Pruned) == 0 {
+		output.WriteString("Nothing to prune.\n")
+	} else {
+		output.WriteString(fmt.Sprintf("Bookmarked and removed %d snapshot(s):\n", len(result.Pruned)))
+		for _, name := range result.Pruned {
+			output.WriteString(fmt.Sprintf("  %s\n", name))
+		}
+	}
+	for _, warning := range result.Warnings {
+		output.WriteString(fmt.Sprintf("Warning:%s\n", warning))
+	}
 }
 
 func listSnapshots() (string, error) {
 	return runCommandOutput("zfs", "list", "-t", "snapshot")
 }
 
-func generateBackupReport(sourcePool, destPool string) (string, error) {
+// generateBackupReport summarises a finished run over the datasets that were
+// actually backed up, rather than assuming a single hardcoded dataset.
+func generateBackupReport(sourcePool, destPool string, datasets []string) (string, error) {
 	var report bytes.Buffer
 
 	report.WriteString("📊 Backup Report Summary\n")
 	report.WriteString(strings.Repeat("─", 50) + "\n")
 
-	sourcePrefix := sourcePool + "/home@"
-	destPrefix := destPool + "/home"
+	hostname := getLocalHostname()
+	sourceDatasets := qualifyDatasets(sourcePool, datasets)
+	destDatasets := backupDestinations(destPool, hostname, datasets)
 
-	// Get oldest snapshot
+	countSnapshots := func(output string, owners []string) int {
+		count := 0
+		for _, line := range strings.Split(output, "\n") {
+			dataset, _, ok := splitSnapshot(strings.TrimSpace(line))
+			if !ok {
+				continue
+			}
+			for _, owner := range owners {
+				if dataset == owner {
+					count++
+					break
+				}
+			}
+		}
+		return count
+	}
+
+	// Get oldest snapshot on the backup pool
 	output, err := runCommandOutput("zfs", "list", "-t", "snapshot", "-o", "name,creation", "-s", "creation")
 	if err == nil {
-		lines := strings.Split(output, "\n")
-		for _, line := range lines {
-			if strings.Contains(line, destPrefix) {
+		for _, line := range strings.Split(output, "\n") {
+			dataset, _, ok := splitSnapshot(strings.TrimSpace(strings.Fields(line+" ")[0]))
+			if !ok {
+				continue
+			}
+			matched := false
+			for _, dest := range destDatasets {
+				if dataset == dest {
+					matched = true
+					break
+				}
+			}
+			if matched {
 				report.WriteString(fmt.Sprintf("• Oldest snapshot: %s\n", line))
 				break
 			}
 		}
 	}
 
-	// Count local snapshots
-	localCount := 0
 	output, err = runCommandOutput("zfs", "list", "-H", "-t", "snapshot", "-o", "name")
-	if err == nil {
-		for _, line := range strings.Split(output, "\n") {
-			if strings.HasPrefix(line, sourcePrefix) {
-				localCount++
-			}
-		}
+	if err != nil {
+		output = ""
 	}
+
+	localCount := countSnapshots(output, sourceDatasets)
 	report.WriteString(fmt.Sprintf("• Snapshots on local: %d\n", localCount))
 
-	// Count backup snapshots
-	backupCount := 0
-	destSnapshotPrefix := destPool + "/home@"
-	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(line, destSnapshotPrefix) {
-			backupCount++
-		}
-	}
+	backupCount := countSnapshots(output, destDatasets)
 	report.WriteString(fmt.Sprintf("• Snapshots on backup: %d\n", backupCount))
 
 	// Missing snapshots

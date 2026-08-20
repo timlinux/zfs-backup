@@ -48,8 +48,13 @@ graph TB
 
 | File | Purpose |
 |------|---------|
-| main.go | TUI application, views, state machine, and main logic |
+| main.go | TUI application, views, state machine, CLI dispatch, and main logic |
 | zfs.go | ZFS operations (backup, prepare, unmount) |
+| datasets.go | Backup scope: the canonical dataset list every phase runs over |
+| snapshots.go | Snapshot naming, creation, pruning and bookmark conversion |
+| doctor.go | Orphan detection, health report, and orphan cleanup |
+| runner.go | Command-execution seam so ZFS logic is testable without a pool |
+| scope_tui.go | Backup scope editor and health check screens |
 | state.go | Backup state management for resume functionality |
 | restore.go | Restore mode with dual-panel file explorer |
 | package.nix | Nix package definition |
@@ -229,22 +234,91 @@ stateDiagram-v2
 - Namespaces backups by local hostname on remote pool
 - Prunes old local snapshots after sync
 
+### US-016: Snapshot Scope Invariant
+
+**As a** system administrator
+**I want** zfs-backup to only ever snapshot the datasets it also replicates and prunes
+**So that** it cannot silently fill an unrelated dataset's quota with snapshots nobody cleans up
+
+**The invariant:**
+
+> zfs-backup must never create a snapshot on a dataset it is not going to
+> replicate **and** subsequently prune.
+
+**Acceptance Criteria:**
+- One canonical dataset list (`resolveBackupDatasets`) is derived at the start
+  of every run and drives every phase: snapshot, replicate, prune, bookmark.
+- `zfs snapshot -r` is never used. Snapshots are created one dataset at a time.
+- The pool root dataset and nested descendants are never snapshotted, because
+  no phase replicates or prunes them.
+- Pruning covers every dataset in the canonical list, not a hardcoded dataset.
+- Only snapshots matching zfs-backup's own naming pattern
+  (`YYYY-MM-DD.HHh-MM-Backup`) are ever pruned or destroyed. sanoid autosnaps,
+  user snapshots and `@blank` are never touched.
+- syncoid is invoked with `--no-sync-snap` wherever zfs-backup has created its
+  own snapshot to replicate from, so a failed send cannot orphan a
+  `syncoid_<host>_<timestamp>` snapshot. The pull-from-remote flow is the sole
+  exception: it does not snapshot the remote, so syncoid's sync snapshot is the
+  only guaranteed replication base there.
+- A dataset whose replication fails has the snapshot created for it this run
+  destroyed again, is named in the run summary, and makes the run exit non-zero.
+
+### US-017: Choose Which Datasets Are Backed Up
+
+**As a** user with a declarative snapshot policy
+**I want to** choose which datasets zfs-backup handles
+**So that** datasets I manage elsewhere (or do not want backed up) are never touched
+
+**Acceptance Criteria:**
+- Scope is saved per pool to `~/.config/zfs-backup/scope.json`.
+- An unconfigured pool backs up every top-level dataset, so existing installs
+  keep their current coverage.
+- The TUI offers a "Backup Scope" screen with tick boxes (space to toggle,
+  `a` all, `n` none, enter to save).
+- The CLI offers `zfs-backup scope [--pool POOL] [--datasets a,b] [--all]`.
+- Selecting every dataset clears the restriction rather than freezing the list,
+  so a dataset added later is still backed up.
+- Configured datasets that no longer exist are reported, not silently dropped.
+- Datasets outside the scope are never snapshotted, replicated or pruned.
+
+### US-018: Backup Health Check and Orphan Cleanup
+
+**As a** user affected by the pre-2.0 recursive snapshot behaviour
+**I want** a way to find and safely remove the snapshots it left behind
+**So that** I can reclaim the space they are pinning
+
+**Acceptance Criteria:**
+- `zfs-backup doctor` (and the TUI "Backup Health Check" screen) is read-only
+  and reports: zfs-backup snapshots on datasets outside the scope, syncoid
+  sync-snapshots older than 24 hours, and datasets whose snapshots consume more
+  than half their quota.
+- `doctor` exits 0 when clean and 1 when issues are found.
+- `zfs-backup cleanup-orphans` defaults to a dry run and requires `--yes` plus
+  a typed `DESTROY` confirmation (or `--force` for automation) to destroy.
+- Cleanup refuses to destroy: protected snapshots (`@blank`), snapshots with
+  holds, snapshots with dependent clones, snapshots on datasets in scope, and
+  anything not matching zfs-backup's own naming patterns.
+- Snapshots are destroyed one at a time, never with a range expression.
+- The summary explains that space is only reclaimed once every snapshot pinning
+  a block is gone, so usage may barely move until the last few are destroyed.
+
 ### US-013: All-Dataset Backup
 **As a** system administrator
 **I want to** back up ALL datasets in my source pool (not just home)
 **So that** my entire system state is protected
 
 **Acceptance Criteria:**
-- Automatically discovers all child datasets of source pool
-- Skips non-mounted datasets (mountpoint "-") such as application-specific datasets
-- Creates recursive snapshots (all datasets at once)
+- Automatically discovers all child datasets of the source pool as the default scope
+- Includes datasets with no mountpoint (e.g. application-managed datasets)
+- Snapshots each dataset in scope individually - never recursively (see US-016)
 - Syncs each dataset individually via syncoid
 - Pre-creates destination datasets before sync to prevent hangs on new datasets
 - Per-dataset progress bar and snapshot dot matrix during sync
 - Snapshot dots use Kartoza brand colors: gray=pending, orange=syncing, blue=done, red=error
 - Errors shown only via dot colors during sync; full error details in final report
 - Final report includes per-dataset timing, sizes, snapshot counts, and error details
-- Continues to next dataset if one fails (non-fatal)
+- Continues to the next dataset if one fails, but the run reports the failed
+  datasets and exits non-zero (see US-016)
 - Per-dataset timeout prevents infinite hangs
 - Applies to local backup, remote pull, and push operations
 - Report written to markdown and PDF at end of each backup
@@ -395,7 +469,22 @@ Support command-line flags for automation:
 - `--backup`: Run incremental backup
 - `--force-backup`: Run force backup (destructive)
 - `--unmount`: Unmount backup disk
+- `--version`: Print the version
 - `--help`: Show help
+
+Subcommands:
+- `scope [--pool POOL] [--datasets a,b] [--all]`: show or set the backup scope
+- `doctor [--pool POOL]`: read-only health check; exits 1 when issues are found
+- `cleanup-orphans [--pool POOL] [--dataset DS] [--yes] [--force]`: remove
+  orphaned snapshots; dry run unless `--yes` is given
+
+### FR-010: Quota vs Refquota
+The health check and documentation must distinguish the two, because it
+determines how a snapshot leak manifests:
+- `quota` limits the dataset **plus** its snapshots and descendants. Orphaned
+  snapshots count against it, so the dataset eventually fails writes.
+- `refquota` limits only referenced (live) data. Orphaned snapshots instead eat
+  pool free space silently.
 
 ## Non-Functional Requirements
 
@@ -430,14 +519,35 @@ Support command-line flags for automation:
 ## Testing Requirements
 
 ### TR-001: Unit Tests
-- State management (save/load/clear)
-- File operations (copy with attributes)
-- Menu navigation logic
+Run with `go test ./...`; no ZFS or root required. A fake command runner
+(`fake_runner_test.go`) records the commands the code would issue, so tests can
+assert which datasets were touched and, just as importantly, which were not.
+- Scope resolution: default-all, restriction, stale entries, ordering
+- Snapshot scope invariant: never `-r`, never the pool root, never a dataset
+  outside the canonical list
+- Rollback of a run's snapshots when a dataset fails
+- Prune selection: keeps the newest, ignores foreign snapshots, covers every
+  dataset in scope, never destroys without a confirmed bookmark
+- Orphan detection: out-of-scope snapshots, stale syncoid snapshots, `@blank`
+  and sanoid snapshots excluded
+- Destroy safety: holds, clones, and unknown state all block destruction
+- `--no-sync-snap` is always passed by `syncoidBaseArgs`
 
 ### TR-002: Integration Tests
-- ZFS pool operations (mock or test pools)
-- Backup workflow stages
-- Restore file selection and copy
+Behind the `integration` build tag, opt-in via `ZFS_BACKUP_INTEGRATION=1`, and
+requiring root. They create and destroy a file-backed pool named
+`zfsbackuptestpool` and refuse to run if it already exists:
+
+```bash
+sudo -E env "PATH=$PATH" go test -tags integration -run TestIntegration -v ./...
+```
+
+- Configure one dataset, snapshot, assert the others have zero snapshots
+- Twelve runs of snapshot + prune keep counts bounded and leave bookmarks
+- A hand-planted orphan is detected and destroyed; `@blank` and in-scope
+  snapshots survive
+- A held snapshot is never cleared for destruction
+- Bookmark-then-destroy round trip against real ZFS
 
 ### TR-003: Manual Testing
 - Full backup cycle on test system
@@ -449,6 +559,8 @@ Support command-line flags for automation:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.0.0 | 2026-08 | **Breaking:** snapshot scope now equals replication scope - no more recursive pool snapshots. Per-pool backup scope selection, `doctor` and `cleanup-orphans` subcommands, pruning fixed to cover every dataset, `--no-sync-snap`, failed datasets exit non-zero |
+| 1.6.0 | 2026-06 | Per-snapshot progress tracking, automatic legacy layout migration, unmounted datasets included, Kartoza brand mkdocs theme |
 | 1.5.0 | 2026-05 | Comprehensive PDF and markdown reports with full pool inventory (datasets, sizes, quotas, compression, snapshots), narrative summary, operation log, and next steps |
 | 1.3.0 | 2026-05 | Added pull/push remote backup via SSH; multi-host support with hostname namespacing; all-dataset backup; smart pool defaults; saved host profiles; fixed force backup flow |
 | 1.2.0 | 2026-03 | Added "Pool Maintenance" with scrub control; fixed pool import/unlock flow; scrollable result reports |

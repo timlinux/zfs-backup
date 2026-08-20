@@ -39,6 +39,13 @@ This document provides an annotated list of all packages in the software archite
 | syscall | Low-level system calls for file ownership (UID/GID) |
 | time | Time handling for timestamps and snapshots |
 
+## Testing
+
+| Package | Purpose |
+|---------|---------|
+| testing | Standard Go test framework - unit tests run without ZFS or root |
+| (build tag `integration`) | Opt-in tests against a throwaway file-backed ZFS pool; require root and `ZFS_BACKUP_INTEGRATION=1` |
+
 ## System Dependencies
 
 | Package | Purpose | Source |
