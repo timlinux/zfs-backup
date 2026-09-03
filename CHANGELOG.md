@@ -11,6 +11,22 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [2.1.0] - 2026-09-03
 
+### Fixed
+
+- **Backup no longer fails when a dataset shares the hostname's name.** On
+  host `abyss`, a dataset called `abyss` made the legacy flat path
+  (`NIXBACKUPS/abyss`) and the hostname namespace container
+  (`NIXBACKUPS/abyss`) the same dataset, so the layout migration asked ZFS to
+  rename it inside itself and the run died with `New dataset name cannot be a
+  descendant of current dataset name`. That collision is now detected, both
+  datasets are left untouched, the run continues, and the report explains what
+  was skipped and why. Merging or renaming would risk data loss, so neither is
+  attempted automatically.
+- **A pool can no longer be selected as both source and destination.**
+  Replicating a pool onto itself sent every dataset into a namespace beside its
+  own source and drove the layout migration into the same impossible rename.
+  It now fails immediately with a plain message instead of a ZFS error.
+
 ### Added
 
 - **Orphan cleanup is now a menu option.** Reclaiming the space left behind by

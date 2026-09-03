@@ -568,7 +568,7 @@ sudo -E env "PATH=$PATH" go test -tags integration -run TestIntegration -v ./...
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 2.1.0 | 2026-09 | Orphan cleanup moved into the TUI: a main-menu item and a `c` key on the health check screen, with a dry-run-first screen and typed `DESTROY` confirmation. CLI and TUI now share one cleanup implementation |
+| 2.1.0 | 2026-09 | Fixed layout migration failing when a dataset shares the hostname's name, and blocked backing a pool up onto itself. Orphan cleanup moved into the TUI: a main-menu item and a `c` key on the health check screen, with a dry-run-first screen and typed `DESTROY` confirmation. CLI and TUI now share one cleanup implementation |
 | 2.0.0 | 2026-08 | **Breaking:** snapshot scope now equals replication scope - no more recursive pool snapshots. Per-pool backup scope selection, `doctor` and `cleanup-orphans` subcommands, pruning fixed to cover every dataset, `--no-sync-snap`, failed datasets exit non-zero |
 | 1.6.0 | 2026-06 | Per-snapshot progress tracking, automatic legacy layout migration, unmounted datasets included, Kartoza brand mkdocs theme |
 | 1.5.0 | 2026-05 | Comprehensive PDF and markdown reports with full pool inventory (datasets, sizes, quotas, compression, snapshots), narrative summary, operation log, and next steps |
