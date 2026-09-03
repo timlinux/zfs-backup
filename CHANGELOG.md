@@ -29,6 +29,13 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The health check and cleanup now say when no backup scope is set.** With no
+  scope chosen every top-level dataset counts as in scope, so the `-Backup`
+  snapshots older versions left on them were treated as managed and never
+  reported. Upgrading users ran the check, saw a healthy pool, ran the cleanup,
+  reclaimed nothing, and had no way to tell why. Both screens now explain the
+  situation and point at Backup Scope. Choose a scope first, then check, then
+  clean.
 - **Orphan cleanup is now a menu option.** Reclaiming the space left behind by
   the pre-2.0 recursive snapshot bug previously required knowing the
   `cleanup-orphans` subcommand and its `--yes` flag. It is now a

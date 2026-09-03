@@ -154,7 +154,11 @@ holding the snapshot data. Only snapshots matching zfs-backup's own naming
 pattern (`2026-08-14.10h-00-Backup`) are ever pruned or destroyed — sanoid
 autosnaps, your own snapshots, and `@blank` are left strictly alone.
 
-> **Upgrading from 1.x?** Versions before 2.0.0 took a recursive snapshot of the
+> **Upgrading from 1.x?** Choose your **Backup Scope** first - with no scope set,
+> every top-level dataset counts as in scope, so the old debris looks managed and
+> the health check will report almost nothing. Scope, then check, then clean.
+>
+> **Why it happened:** Versions before 2.0.0 took a recursive snapshot of the
 > whole pool but only pruned one dataset, so `-Backup` snapshots accumulated on
 > datasets that were never meant to be backed up. Open **Backup Health Check**
 > from the menu to see whether you are affected, then press `c` to clean it up -

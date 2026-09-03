@@ -61,6 +61,28 @@ you create later is still backed up.
     `home` keeps the two tools' responsibilities aligned: sanoid owns local
     retention, zfs-backup owns replication to the backup drive.
 
+## Upgrading from 1.x: do this in order
+
+The order matters, and getting it wrong makes the tool look broken.
+
+With no scope chosen, **every** top-level dataset counts as in scope. The
+`-Backup` snapshots that older versions strewed across `root`, `nix` and the
+rest therefore look managed rather than orphaned, so the health check reports
+almost nothing and the cleanup reclaims almost nothing.
+
+So choose the scope first:
+
+1. **Backup Scope** - tick only the datasets you actually want backed up.
+   Everything you leave out becomes eligible for cleanup.
+2. **Backup Health Check** - now it can see the debris on the datasets you
+   excluded.
+3. Press ++c++ - review the dry run, then type `DESTROY`.
+4. Run a backup. From here on zfs-backup only snapshots what it also
+   replicates and prunes.
+
+Both the health check and the cleanup screen say so if no scope is set yet, so
+you are not left guessing why a pool full of debris reports as healthy.
+
 ## Checking backup health
 
 **Backup Health Check** in the menu, or `zfs-backup doctor` on the command line,
