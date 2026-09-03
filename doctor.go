@@ -399,7 +399,7 @@ func runDoctor(ctx context.Context, r commandRunner, pool string) int {
 }
 
 // =============================================================================
-// cleanup-orphans subcommand
+// Cleanup planning - shared by the TUI screen and the CLI subcommand
 // =============================================================================
 
 // cleanupOptions controls the cleanup-orphans subcommand.
@@ -410,128 +410,76 @@ type cleanupOptions struct {
 	Force   bool   // --force: skip the typed confirmation prompt
 }
 
-// runCleanupOrphans reports, and optionally destroys, orphaned snapshots. Dry
-// run is the default; destroying requires --yes plus a typed confirmation.
-// It returns the process exit code.
-func runCleanupOrphans(ctx context.Context, r commandRunner, opts cleanupOptions, confirmFn func(string) bool) int {
-	fmt.Println()
-	fmt.Println(titleStyle.Render("zfs-backup cleanup-orphans"))
-	fmt.Println(interstitialStyle.Render(strings.Repeat("─", 60)))
-	fmt.Println()
+// cleanupPlan is the vetted answer to "what would cleanup destroy?". Building a
+// plan performs no destructive work whatsoever - it only reads.
+type cleanupPlan struct {
+	Scan      *orphanScan
+	Dataset   string            // the dataset filter that was applied, if any
+	Decisions []destroyDecision // every candidate, safe or skipped
+	Targets   []string          // the subset cleared for destruction
+}
 
-	scan, err := collectOrphanScan(ctx, r, opts.Pool)
+// buildCleanupPlan scans a pool and vets every orphan it finds. Both the TUI
+// cleanup screen and the cleanup-orphans subcommand go through this one
+// function, so a snapshot the CLI would refuse to touch is equally untouchable
+// from the menu.
+func buildCleanupPlan(ctx context.Context, r commandRunner, pool, dataset string) (*cleanupPlan, error) {
+	scan, err := collectOrphanScan(ctx, r, pool)
 	if err != nil {
-		fmt.Println(errorStyle.Render("Error: " + err.Error()))
-		return 1
+		return nil, err
 	}
 
 	orphans := scan.Orphans
-	if opts.Dataset != "" {
+	if dataset != "" {
 		var filtered []orphanSnapshot
 		for _, o := range orphans {
-			if o.Dataset == opts.Dataset {
+			if o.Dataset == dataset {
 				filtered = append(filtered, o)
 			}
 		}
 		orphans = filtered
 	}
 
-	if len(orphans) == 0 {
-		fmt.Println(statusStyle.Render("[OK] Nothing to clean up."))
-		fmt.Println()
-		return 0
-	}
-
-	fmt.Println(infoStyle.Render(describeScope(scan.Pool, scan.InScope, scan.Missing)))
-	fmt.Println(infoStyle.Render("Datasets in scope are never touched by this command."))
-	fmt.Println()
-
 	decisions := vetOrphans(ctx, r, orphans)
-	printCleanupPlan(decisions)
-
-	targets := safeToDestroy(decisions)
-	if len(targets) == 0 {
-		fmt.Println(warningStyle.Render("Every candidate was skipped by a safety check. Nothing to do."))
-		fmt.Println()
-		return 0
-	}
-
-	if !opts.Confirm {
-		fmt.Println(infoStyle.Render("Dry run - nothing has been destroyed."))
-		fmt.Println()
-		for _, name := range targets {
-			if out, err := r.Output(ctx, "zfs", "destroy", "-nv", name); err == nil {
-				trimmed := strings.TrimSpace(out)
-				if trimmed != "" {
-					fmt.Printf("  %s\n", trimmed)
-				}
-			} else {
-				fmt.Println(warningStyle.Render(fmt.Sprintf("  %s: dry run failed: %v", name, err)))
-			}
-		}
-		fmt.Println()
-		fmt.Println(infoStyle.Render(fmt.Sprintf(
-			"Re-run with --yes to destroy these %d snapshot(s).", len(targets))))
-		fmt.Println()
-		return 0
-	}
-
-	fmt.Println(destructiveWarningStyle.Render(
-		"  DESTROYING SNAPSHOTS IS IRREVERSIBLE  "))
-	fmt.Println()
-	fmt.Println(warningStyle.Render(fmt.Sprintf(
-		"About to destroy %d snapshot(s) on pool %s.", len(targets), scan.Pool)))
-	fmt.Println(infoStyle.Render(
-		"Space is only reclaimed once every snapshot pinning a block is gone, so\n" +
-			"usage may barely move until the last few are destroyed."))
-	fmt.Println()
-
-	if !opts.Force && !confirmFn("Type DESTROY to continue: ") {
-		fmt.Println(statusStyle.Render("Aborted. Nothing was destroyed."))
-		fmt.Println()
-		return 1
-	}
-
-	destroyed := 0
-	var failures []string
-	for _, name := range targets {
-		// One snapshot at a time - never a range expression, which would
-		// happily take out snapshots that did not match the pattern.
-		if err := r.Run(ctx, "zfs", "destroy", name); err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", name, err))
-			continue
-		}
-		destroyed++
-		fmt.Printf("  destroyed %s\n", name)
-	}
-
-	fmt.Println()
-	fmt.Println(statusStyle.Render(fmt.Sprintf("Destroyed %d of %d snapshot(s).", destroyed, len(targets))))
-	for _, f := range failures {
-		fmt.Println(errorStyle.Render("  failed: " + f))
-	}
-
-	if usage, err := listDatasetUsage(ctx, r, scan.Pool); err == nil {
-		fmt.Println()
-		fmt.Println(labelStyle.Render("Space after cleanup:"))
-		for _, u := range usage {
-			fmt.Printf("  %-32s used %10s  snapshots %10s\n",
-				u.Name, formatSize(u.Used), formatSize(u.UsedBySnapshots))
-		}
-	}
-	fmt.Println()
-
-	if len(failures) > 0 {
-		return 1
-	}
-	return 0
+	return &cleanupPlan{
+		Scan:      scan,
+		Dataset:   dataset,
+		Decisions: decisions,
+		Targets:   safeToDestroy(decisions),
+	}, nil
 }
 
-// printCleanupPlan renders the per-dataset summary of what cleanup would do.
-func printCleanupPlan(decisions []destroyDecision) {
+// uniqueBytes totals the space uniquely held by the snapshots cleared for
+// destruction. It is a floor, not a promise: blocks shared with a snapshot that
+// survives are counted against neither, so the real saving is usually larger.
+func (p *cleanupPlan) uniqueBytes() int64 {
+	var total int64
+	for _, d := range p.Decisions {
+		if d.Safe && d.Orphan.Used > 0 {
+			total += d.Orphan.Used
+		}
+	}
+	return total
+}
+
+// skipped returns the candidates a safety check refused to destroy.
+func (p *cleanupPlan) skipped() []destroyDecision {
+	var out []destroyDecision
+	for _, d := range p.Decisions {
+		if !d.Safe {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// renderCleanupPlan describes a plan as text: what would go, per dataset, and
+// what a safety check held back. Returned as a string so the TUI can put it in
+// a viewport and the CLI can print it verbatim.
+func renderCleanupPlan(plan *cleanupPlan) string {
 	byDataset := map[string][]destroyDecision{}
 	var order []string
-	for _, d := range decisions {
+	for _, d := range plan.Decisions {
 		ds := d.Orphan.Dataset
 		if _, seen := byDataset[ds]; !seen {
 			order = append(order, ds)
@@ -540,6 +488,7 @@ func printCleanupPlan(decisions []destroyDecision) {
 	}
 	sort.Strings(order)
 
+	var b strings.Builder
 	for _, ds := range order {
 		var safe, skipped int
 		var unique int64
@@ -553,16 +502,157 @@ func printCleanupPlan(decisions []destroyDecision) {
 				skipped++
 			}
 		}
-		fmt.Printf("  %s\n", labelStyle.Render(ds))
-		fmt.Printf("    %d snapshot(s) to destroy, %s uniquely referenced\n", safe, formatSize(unique))
+		fmt.Fprintf(&b, "  %s\n", labelStyle.Render(ds))
+		fmt.Fprintf(&b, "    %d snapshot(s) to destroy, %s uniquely referenced\n",
+			safe, formatSize(unique))
 		if skipped > 0 {
 			for _, d := range byDataset[ds] {
 				if !d.Safe {
-					fmt.Println(warningStyle.Render(fmt.Sprintf(
+					b.WriteString(warningStyle.Render(fmt.Sprintf(
 						"    skipping %s (%s)", d.Orphan.Name, d.SkipReason)))
+					b.WriteString("\n")
 				}
 			}
 		}
 	}
-	fmt.Println()
+	return b.String()
 }
+
+// previewDestroy asks ZFS what each destroy would free, without destroying
+// anything. Returns one line per snapshot.
+func previewDestroy(ctx context.Context, r commandRunner, targets []string) []string {
+	lines := make([]string, 0, len(targets))
+	for _, name := range targets {
+		out, err := r.Output(ctx, "zfs", "destroy", "-nv", name)
+		if err != nil {
+			lines = append(lines, fmt.Sprintf("%s: dry run failed: %v", name, err))
+			continue
+		}
+		if trimmed := strings.TrimSpace(out); trimmed != "" {
+			lines = append(lines, trimmed)
+		}
+	}
+	return lines
+}
+
+// cleanupOutcome records what actually happened during a destroy run.
+type cleanupOutcome struct {
+	Destroyed []string
+	Failures  []string
+}
+
+// destroyPlannedSnapshots destroys the vetted targets one at a time. progress,
+// if non-nil, is called after each snapshot so a UI can show movement.
+//
+// One snapshot per call - never a range expression, which would happily take
+// out snapshots that never appeared in the plan.
+func destroyPlannedSnapshots(ctx context.Context, r commandRunner, targets []string, progress func(string)) cleanupOutcome {
+	var outcome cleanupOutcome
+	for _, name := range targets {
+		if err := r.Run(ctx, "zfs", "destroy", name); err != nil {
+			outcome.Failures = append(outcome.Failures, fmt.Sprintf("%s: %v", name, err))
+			continue
+		}
+		outcome.Destroyed = append(outcome.Destroyed, name)
+		if progress != nil {
+			progress(name)
+		}
+	}
+	return outcome
+}
+
+// =============================================================================
+// cleanup-orphans subcommand
+// =============================================================================
+
+// runCleanupOrphans reports, and optionally destroys, orphaned snapshots. Dry
+// run is the default; destroying requires --yes plus a typed confirmation.
+// It returns the process exit code.
+func runCleanupOrphans(ctx context.Context, r commandRunner, opts cleanupOptions, confirmFn func(string) bool) int {
+	fmt.Println()
+	fmt.Println(titleStyle.Render("zfs-backup cleanup-orphans"))
+	fmt.Println(interstitialStyle.Render(strings.Repeat("─", 60)))
+	fmt.Println()
+
+	plan, err := buildCleanupPlan(ctx, r, opts.Pool, opts.Dataset)
+	if err != nil {
+		fmt.Println(errorStyle.Render("Error: " + err.Error()))
+		return 1
+	}
+
+	if len(plan.Decisions) == 0 {
+		fmt.Println(statusStyle.Render("[OK] Nothing to clean up."))
+		fmt.Println()
+		return 0
+	}
+
+	fmt.Println(infoStyle.Render(describeScope(plan.Scan.Pool, plan.Scan.InScope, plan.Scan.Missing)))
+	fmt.Println(infoStyle.Render("Datasets in scope are never touched by this command."))
+	fmt.Println()
+	fmt.Print(renderCleanupPlan(plan))
+	fmt.Println()
+
+	if len(plan.Targets) == 0 {
+		fmt.Println(warningStyle.Render("Every candidate was skipped by a safety check. Nothing to do."))
+		fmt.Println()
+		return 0
+	}
+
+	if !opts.Confirm {
+		fmt.Println(infoStyle.Render("Dry run - nothing has been destroyed."))
+		fmt.Println()
+		for _, line := range previewDestroy(ctx, r, plan.Targets) {
+			fmt.Printf("  %s\n", line)
+		}
+		fmt.Println()
+		fmt.Println(infoStyle.Render(fmt.Sprintf(
+			"Re-run with --yes to destroy these %d snapshot(s).", len(plan.Targets))))
+		fmt.Println()
+		return 0
+	}
+
+	fmt.Println(destructiveWarningStyle.Render(
+		"  DESTROYING SNAPSHOTS IS IRREVERSIBLE  "))
+	fmt.Println()
+	fmt.Println(warningStyle.Render(fmt.Sprintf(
+		"About to destroy %d snapshot(s) on pool %s.", len(plan.Targets), plan.Scan.Pool)))
+	fmt.Println(infoStyle.Render(reclaimCaveat))
+	fmt.Println()
+
+	if !opts.Force && !confirmFn("Type DESTROY to continue: ") {
+		fmt.Println(statusStyle.Render("Aborted. Nothing was destroyed."))
+		fmt.Println()
+		return 1
+	}
+
+	outcome := destroyPlannedSnapshots(ctx, r, plan.Targets, func(name string) {
+		fmt.Printf("  destroyed %s\n", name)
+	})
+
+	fmt.Println()
+	fmt.Println(statusStyle.Render(fmt.Sprintf("Destroyed %d of %d snapshot(s).",
+		len(outcome.Destroyed), len(plan.Targets))))
+	for _, f := range outcome.Failures {
+		fmt.Println(errorStyle.Render("  failed: " + f))
+	}
+
+	if usage, err := listDatasetUsage(ctx, r, plan.Scan.Pool); err == nil {
+		fmt.Println()
+		fmt.Println(labelStyle.Render("Space after cleanup:"))
+		for _, u := range usage {
+			fmt.Printf("  %-32s used %10s  snapshots %10s\n",
+				u.Name, formatSize(u.Used), formatSize(u.UsedBySnapshots))
+		}
+	}
+	fmt.Println()
+
+	if len(outcome.Failures) > 0 {
+		return 1
+	}
+	return 0
+}
+
+// reclaimCaveat explains why freed space often looks disappointing at first.
+// Shown identically by the CLI and the TUI cleanup screen.
+const reclaimCaveat = "Space is only reclaimed once every snapshot pinning a block is gone, so\n" +
+	"usage may barely move until the last few are destroyed."
