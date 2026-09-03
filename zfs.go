@@ -272,6 +272,12 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 	if destPool == "" {
 		return "", fmt.Errorf("destination pool not selected")
 	}
+	// Replicating a pool onto itself would have syncoid send every dataset into
+	// a namespace beside its own source, and the layout migration would be asked
+	// to move datasets inside themselves.
+	if sourcePool == destPool {
+		return "", fmt.Errorf("source and destination are both %s - a pool cannot be backed up onto itself", sourcePool)
+	}
 
 	output.WriteString(fmt.Sprintf("Backing up %s → %s\n\n", sourcePool, destPool))
 
@@ -637,6 +643,12 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 	}
 	if destPool == "" {
 		return "", fmt.Errorf("destination pool not selected")
+	}
+	// Replicating a pool onto itself would have syncoid send every dataset into
+	// a namespace beside its own source, and the layout migration would be asked
+	// to move datasets inside themselves.
+	if sourcePool == destPool {
+		return "", fmt.Errorf("source and destination are both %s - a pool cannot be backed up onto itself", sourcePool)
 	}
 
 	output.WriteString(fmt.Sprintf("Force backing up %s → %s\n\n", sourcePool, destPool))
@@ -1023,6 +1035,12 @@ func performRecover(ctx context.Context, password, sourcePool, destPool string, 
 	}
 	if destPool == "" {
 		return "", fmt.Errorf("destination pool not selected")
+	}
+	// Replicating a pool onto itself would have syncoid send every dataset into
+	// a namespace beside its own source, and the layout migration would be asked
+	// to move datasets inside themselves.
+	if sourcePool == destPool {
+		return "", fmt.Errorf("source and destination are both %s - a pool cannot be backed up onto itself", sourcePool)
 	}
 
 	output.WriteString(fmt.Sprintf("Recovering backup sync: %s -> %s\n\n", sourcePool, destPool))
@@ -2087,55 +2105,100 @@ func trackSyncProgress(
 	return syncErr
 }
 
+// layoutRename is one pending legacy-layout move.
+type layoutRename struct {
+	from string
+	to   string
+}
+
+// layoutMigrationPlan is the decision about what the legacy-layout migration
+// should do, worked out before any ZFS command runs.
+type layoutMigrationPlan struct {
+	Renames   []layoutRename
+	Conflicts []string // dataset exists at both the flat and namespaced path
+	Ambiguous []string // dataset shares its name with the hostname namespace
+}
+
+// planLayoutMigration decides which datasets need moving from the legacy flat
+// path (<destPool>/<ds>) into the hostname namespace
+// (<destPool>/<hostname>/<ds>). exists reports whether a dataset path is
+// present, so the decision can be tested without a pool.
+func planLayoutMigration(destPool, hostname string, datasets []string, exists func(string) bool) layoutMigrationPlan {
+	var plan layoutMigrationPlan
+
+	for _, ds := range datasets {
+		flatPath := fmt.Sprintf("%s/%s", destPool, ds)
+		nsPath := getHostnameDatasetPath(destPool, hostname, ds)
+
+		// A dataset whose name equals the hostname makes the legacy flat path
+		// and the namespace container the same dataset: <destPool>/<hostname>.
+		// Renaming it to <destPool>/<hostname>/<hostname> is not merely wrong,
+		// it is impossible - ZFS refuses to make a dataset a descendant of
+		// itself. We cannot tell from the path alone whether that dataset is a
+		// leftover flat copy or the namespace container holding every other
+		// backup, so we touch neither and say so.
+		if ds == hostname {
+			if exists(flatPath) {
+				plan.Ambiguous = append(plan.Ambiguous, ds)
+			}
+			continue
+		}
+
+		flatExists := exists(flatPath)
+		nsExists := exists(nsPath)
+
+		switch {
+		case flatExists && nsExists:
+			plan.Conflicts = append(plan.Conflicts, ds)
+		case flatExists:
+			plan.Renames = append(plan.Renames, layoutRename{from: flatPath, to: nsPath})
+		}
+	}
+
+	return plan
+}
+
 // migrateLegacyDestinationLayout renames any datasets sitting at the legacy
 // flat path (<destPool>/<ds>) into the hostname-namespaced layout
 // (<destPool>/<hostname>/<ds>). Returns an error if a dataset exists at both
 // the flat and the namespaced location, since silently merging would risk
 // data loss. Writes a one-line note to output for every rename performed.
 func migrateLegacyDestinationLayout(ctx context.Context, destPool, hostname string, datasets []string, output *strings.Builder) error {
-	type pending struct {
-		from string
-		to   string
-	}
-	var renames []pending
-	var conflicts []string
-
-	for _, ds := range datasets {
-		flatPath := fmt.Sprintf("%s/%s", destPool, ds)
-		nsPath := getHostnameDatasetPath(destPool, hostname, ds)
-
-		_, flatErr := runCommandOutput("zfs", "list", "-H", flatPath)
-		_, nsErr := runCommandOutput("zfs", "list", "-H", nsPath)
-
-		flatExists := flatErr == nil
-		nsExists := nsErr == nil
-
-		if flatExists && nsExists {
-			conflicts = append(conflicts, ds)
-			continue
-		}
-		if flatExists && !nsExists {
-			renames = append(renames, pending{from: flatPath, to: nsPath})
-		}
+	exists := func(path string) bool {
+		_, err := runCommandOutput("zfs", "list", "-H", path)
+		return err == nil
 	}
 
-	if len(conflicts) > 0 {
+	plan := planLayoutMigration(destPool, hostname, datasets, exists)
+
+	if len(plan.Conflicts) > 0 {
 		return fmt.Errorf("legacy-layout migration aborted: datasets exist at both %s/<name> and %s/%s/<name> for: %s. Please resolve manually (e.g. zfs destroy the unwanted copy)",
-			destPool, destPool, hostname, strings.Join(conflicts, ", "))
+			destPool, destPool, hostname, strings.Join(plan.Conflicts, ", "))
 	}
 
-	if len(renames) == 0 {
+	// Ambiguous datasets are reported but never touched: leaving a duplicate in
+	// place costs disk, guessing wrong costs data.
+	for _, ds := range plan.Ambiguous {
+		output.WriteString(fmt.Sprintf(
+			"NOTE: %s/%s shares its name with this host's backup namespace, so it\n"+
+				"      cannot be migrated automatically. It is left untouched; %s will be\n"+
+				"      backed up to %s from now on. If %s/%s is a leftover copy from an\n"+
+				"      older version, remove it manually once you have checked it.\n",
+			destPool, ds, ds, getHostnameDatasetPath(destPool, hostname, ds), destPool, ds))
+	}
+
+	if len(plan.Renames) == 0 {
 		return nil
 	}
 
-	output.WriteString(fmt.Sprintf("Migrating %d legacy dataset(s) to hostname namespace (%s/%s/...)\n", len(renames), destPool, hostname))
+	output.WriteString(fmt.Sprintf("Migrating %d legacy dataset(s) to hostname namespace (%s/%s/...)\n", len(plan.Renames), destPool, hostname))
 
 	nsParent := fmt.Sprintf("%s/%s", destPool, hostname)
 	if err := ensureDatasetExists(ctx, nsParent); err != nil {
 		return fmt.Errorf("failed to create %s parent for migration: %w", nsParent, err)
 	}
 
-	for _, r := range renames {
+	for _, r := range plan.Renames {
 		output.WriteString(fmt.Sprintf("  zfs rename %s -> %s\n", r.from, r.to))
 		if err := runCommandWithContext(ctx, "zfs", "rename", r.from, r.to); err != nil {
 			return fmt.Errorf("failed to rename %s to %s: %w", r.from, r.to, err)
