@@ -225,6 +225,15 @@ func (m model) updateDoctorScreen(msg tea.KeyMsg) (model, tea.Cmd) {
 	case "r":
 		m.doctorReady = false
 		return m, loadDoctorReport(m.doctorPool)
+	case "c":
+		// The cure sits one key away from the diagnosis, rather than in a
+		// command-line flag nobody would find.
+		m.state = stateCleanup
+		m.cleanupPool = m.doctorPool
+		m.cleanupReady = false
+		m.cleanupPhase = cleanupPhasePlan
+		m.cleanupMessage = ""
+		return m, tea.Batch(m.spinner.Tick, loadCleanupPlan(m.doctorPool))
 	default:
 		var cmd tea.Cmd
 		m.doctorViewport, cmd = m.doctorViewport.Update(msg)
@@ -253,14 +262,14 @@ func (m model) renderDoctorContent(width int) string {
 	verdict := statusStyle.Render("Healthy - nothing to clean up")
 	if m.doctorProblems > 0 {
 		verdict = warningStyle.Render(fmt.Sprintf(
-			"%d issue group(s) - run 'sudo zfs-backup cleanup-orphans' to reclaim space",
+			"%d issue group(s) found - press c to clean them up",
 			m.doctorProblems))
 	}
 	b.WriteString(lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(verdict))
 	b.WriteString("\n")
 
 	scrollInfo := subtitleStyle.Render(fmt.Sprintf(
-		"Scroll: j/k or arrows | %d%% | r refresh | esc/q to return",
+		"Scroll: j/k or arrows | %d%% | c clean up | r refresh | esc/q to return",
 		int(m.doctorViewport.ScrollPercent()*100)))
 	b.WriteString(lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(scrollInfo))
 

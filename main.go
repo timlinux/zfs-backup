@@ -348,6 +348,8 @@ func (m model) getStatusText() string {
 		return "Backup Scope"
 	case stateDoctor:
 		return "Backup Health"
+	case stateCleanup:
+		return "Cleanup"
 	case stateMaintenance:
 		return "Pool Maintenance"
 	case stateQuotaManage:
@@ -390,7 +392,9 @@ func (m model) getHotkeys() string {
 	case stateScope:
 		return "↑/k up • ↓/j down • space toggle • a all • n none • enter save • esc return"
 	case stateDoctor:
-		return "scroll up/down • r refresh • esc return"
+		return "scroll up/down • c clean up • r refresh • esc return"
+	case stateCleanup:
+		return m.cleanupHotkeys()
 	case stateMaintenance:
 		return "s start scrub • x stop scrub • r refresh • esc return"
 	case stateQuotaManage:
@@ -446,6 +450,7 @@ var mainMenuItems = []menuItem{
 	{title: "Manage Datasets", description: "View/edit quotas, create and delete ZFS datasets", icon: ""},
 	{title: "Backup Scope", description: "Choose which datasets are backed up - anything else is never touched", icon: ""},
 	{title: "Backup Health Check", description: "Find orphaned snapshots and datasets whose quota is filling with snapshots", icon: ""},
+	{title: "Clean Up Orphaned Snapshots", description: "Reclaim space taken by snapshots older versions left behind - shows a dry run first", icon: ""},
 	{title: "Browse Reports", description: "View previous backup reports with timings, sizes, and error details", icon: ""},
 	{title: "Recover Failed Backup", description: "Fix broken sync state when backup was interrupted or snapshot was deleted", icon: ""},
 	{title: "Unmount Backup Disk", description: "Safely export the backup pool and power off the USB drive", icon: ""},
@@ -511,6 +516,14 @@ type model struct {
 	doctorViewport   viewport.Model // Scrollable viewport for the report
 	doctorReady      bool           // Is the report ready?
 	doctorProblems   int            // Number of issue groups found
+	// Orphan cleanup
+	cleanupPool      string         // Pool being cleaned
+	cleanupPlan      *cleanupPlan   // Vetted dry run - what would be destroyed
+	cleanupViewport  viewport.Model // Scrollable plan / result body
+	cleanupReady     bool           // Is the plan ready?
+	cleanupPhase     cleanupPhase   // Plan, confirm, running or done
+	cleanupOutcome   cleanupOutcome // What the destroy run actually did
+	cleanupMessage   string         // Inline validation / abort message
 	// Maintenance
 	maintenancePool    string         // Selected pool for maintenance
 	maintenanceAction  string         // Current maintenance action
@@ -1156,10 +1169,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 						// Backup scope and the health check act on the source
 						// pool alone, so there is no destination to pick.
-						if m.operation == "scope" || m.operation == "doctor" {
+						if m.operation == "scope" || m.operation == "doctor" || m.operation == "cleanup" {
 							m.selectingPool = false
 							m.scopePool = selectedPool
 							m.doctorPool = selectedPool
+							m.cleanupPool = selectedPool
 							return m, m.preparePoolAccess(selectedPool)
 						}
 
@@ -1198,6 +1212,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.scopePool = selectedPool
 						case "doctor":
 							m.doctorPool = selectedPool
+						case "cleanup":
+							m.cleanupPool = selectedPool
 						}
 
 						// Smart pool access: import if needed, skip password if already unlocked
@@ -1354,6 +1370,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				case "Backup Scope":
 					m.operation = "scope"
+					m.startPoolSelection(true)
+					return m, nil
+				case "Clean Up Orphaned Snapshots":
+					m.operation = "cleanup"
 					m.startPoolSelection(true)
 					return m, nil
 				case "Backup Health Check":
@@ -1553,6 +1573,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateScopeScreen(msg)
 		} else if m.state == stateDoctor {
 			return m.updateDoctorScreen(msg)
+		} else if m.state == stateCleanup {
+			return m.updateCleanupScreen(msg)
 		} else if m.state == stateZpoolInfo {
 			switch msg.String() {
 			case "esc", "q":
@@ -1865,6 +1887,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = stateDoctor
 			m.doctorReady = false
 			return m, tea.Batch(m.spinner.Tick, loadDoctorReport(m.doctorPool))
+		case "cleanup":
+			m.state = stateCleanup
+			m.cleanupReady = false
+			m.cleanupPhase = cleanupPhasePlan
+			m.cleanupMessage = ""
+			return m, tea.Batch(m.spinner.Tick, loadCleanupPlan(m.cleanupPool))
 		case "maintenance":
 			return m, m.loadMaintenanceStatus()
 		case "backup", "force-backup", "recover", "remote-backup", "push-backup":
@@ -1920,6 +1948,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.doctorViewport = newReportViewport(m.width, m.height, msg.content)
 		m.doctorReady = true
 		return m, nil
+
+	case cleanupPlanMsg:
+		if msg.err != nil {
+			m.state = stateResult
+			m.err = msg.err
+			m.message = ""
+			return m, nil
+		}
+		m.state = stateCleanup
+		m.cleanupPool = msg.pool
+		m.cleanupPlan = msg.plan
+		m.cleanupPhase = cleanupPhasePlan
+		m.cleanupViewport = newReportViewport(m.width, m.height,
+			buildCleanupPlanView(msg.plan, msg.preview))
+		m.cleanupReady = true
+		return m, nil
+
+	case cleanupDoneMsg:
+		m.cleanupOutcome = msg.outcome
+		m.cleanupPhase = cleanupPhaseDone
+		m.cleanupViewport = newReportViewport(m.width, m.height,
+			buildCleanupResultView(m.cleanupPool, msg.outcome, msg.usage))
+		m.cleanupReady = true
 
 	case maintenanceStatusMsg:
 		if msg.err != nil {
@@ -2243,6 +2294,8 @@ func (m model) renderContentNopad(width int) string {
 		content.WriteString(m.renderScopeContent(width))
 	case stateDoctor:
 		content.WriteString(m.renderDoctorContent(width))
+	case stateCleanup:
+		content.WriteString(m.renderCleanupContent(width))
 	case stateMaintenance:
 		content.WriteString(m.renderMaintenanceContent(width))
 	case stateQuotaManage:
@@ -3163,6 +3216,22 @@ OPERATIONS
 
   Manage Quotas
      View and edit dataset quotas. Units: T, G, M, K.
+
+  Backup Scope
+     Tick the datasets you want backed up. Only those are
+     snapshotted, replicated and pruned - everything else is
+     left completely untouched.
+
+  Backup Health Check
+     Read-only. Finds snapshots left behind by older versions and
+     datasets whose quota is being eaten by snapshots. Press c on
+     that screen to go straight to the cleanup.
+
+  Clean Up Orphaned Snapshots
+     Reclaims that space. Always shows a dry run first and asks you
+     to type DESTROY before touching anything. Held snapshots,
+     snapshots with clones and protected snapshots are never
+     destroyed.
 
   Prepare Backup Device
      Creates an encrypted ZFS pool on a new external drive.
@@ -4282,6 +4351,7 @@ Commands:
     --force             Skip the typed confirmation prompt
 
 If no options are provided, an interactive TUI menu will be displayed.
+Scope, health and cleanup are all main-menu items too - no flags needed.
 
 Examples:
   sudo zfs-backup                                   # Show interactive menu
