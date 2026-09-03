@@ -242,6 +242,10 @@ func (m model) renderCleanupDoneFooter() string {
 func buildCleanupPlanView(plan *cleanupPlan, preview []string) string {
 	var b strings.Builder
 
+	if notice := unsetScopeNotice(plan.Scan); notice != "" {
+		b.WriteString(warningStyle.Render(notice))
+		b.WriteString("\n")
+	}
 	b.WriteString(infoStyle.Render(describeScope(plan.Scan.Pool, plan.Scan.InScope, plan.Scan.Missing)))
 	b.WriteString("\n")
 	b.WriteString(infoStyle.Render("Datasets in scope are never touched by this screen."))

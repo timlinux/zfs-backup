@@ -206,3 +206,67 @@ func TestGroupOrphansByDataset(t *testing.T) {
 		t.Errorf("expected 2 orphans on NIXROOT/root, got %d", len(grouped["NIXROOT/root"]))
 	}
 }
+
+// The 1.x upgrade trap: with no scope chosen, every top-level dataset counts
+// as in scope, so the snapshots older versions left on them are treated as
+// managed and never reported. The report must say so, or a pool holding
+// gigabytes of debris reads as healthy.
+func TestDoctorReportWarnsWhenNoScopeIsConfigured(t *testing.T) {
+	scan := &orphanScan{
+		Pool:            "NIXROOT",
+		InScope:         []string{"home", "root", "nix"},
+		ScopeConfigured: false,
+	}
+
+	report, _ := renderDoctorReport(scan)
+
+	for _, want := range []string{
+		"no backup scope is set for NIXROOT",
+		"all 3 top-level dataset(s)",
+		"are NOT listed below",
+		"Backup Scope",
+	} {
+		if !strings.Contains(report, want) {
+			t.Errorf("report does not mention %q:\n%s", want, report)
+		}
+	}
+}
+
+// The warning is upgrade guidance, not a permanent nag.
+func TestDoctorReportIsQuietOnceAScopeIsChosen(t *testing.T) {
+	scan := &orphanScan{
+		Pool:            "NIXROOT",
+		InScope:         []string{"home"},
+		ScopeConfigured: true,
+	}
+
+	report, problems := renderDoctorReport(scan)
+
+	if strings.Contains(report, "no backup scope is set") {
+		t.Errorf("a configured pool must not be nagged:\n%s", report)
+	}
+	if problems != 0 {
+		t.Errorf("a clean configured pool should report no problems, got %d", problems)
+	}
+}
+
+// The warning must survive the case it exists for: a pool that otherwise looks
+// completely clean.
+func TestUnsetScopeNoticeShowsOnAnApparentlyCleanPool(t *testing.T) {
+	scan := &orphanScan{Pool: "NIXROOT", InScope: []string{"home", "root"}}
+
+	report, _ := renderDoctorReport(scan)
+
+	if !strings.Contains(report, "No orphaned zfs-backup or syncoid snapshots found") {
+		t.Fatalf("expected the clean verdict in this fixture:\n%s", report)
+	}
+	if !strings.Contains(report, "no backup scope is set") {
+		t.Errorf("the clean verdict is exactly when the warning matters:\n%s", report)
+	}
+}
+
+func TestUnsetScopeNoticeIsEmptyWhenConfigured(t *testing.T) {
+	if notice := unsetScopeNotice(&orphanScan{Pool: "NIXROOT", ScopeConfigured: true}); notice != "" {
+		t.Errorf("expected no notice, got %q", notice)
+	}
+}

@@ -237,3 +237,21 @@ func describeScope(pool string, selected, missing []string) string {
 	}
 	return b.String()
 }
+
+// IsPoolScopeConfigured reports whether the user has chosen which datasets of
+// a pool to back up, as opposed to falling through to the "every direct child"
+// default.
+//
+// The distinction matters during the 1.x upgrade: with no scope configured,
+// every top-level dataset counts as in scope, so the snapshots that older
+// versions strewed across them look managed rather than orphaned and the
+// health check finds almost nothing. Callers surface this so the user is not
+// left thinking a pool full of debris is clean.
+func IsPoolScopeConfigured(pool string) (bool, error) {
+	scope, err := LoadBackupScope()
+	if err != nil {
+		return false, err
+	}
+	_, configured := scope.Pools[pool]
+	return configured, nil
+}

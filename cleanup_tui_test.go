@@ -408,3 +408,36 @@ func TestHealthScreenCarriesThePoolIntoCleanup(t *testing.T) {
 		t.Error("c should start loading the plan")
 	}
 }
+
+func TestCleanupPlanViewWarnsWhenNoScopeIsConfigured(t *testing.T) {
+	plan := planFixture()
+	plan.Scan.ScopeConfigured = false
+
+	view := buildCleanupPlanView(plan, nil)
+
+	if !strings.Contains(view, "no backup scope is set") {
+		t.Errorf("the cleanup screen must explain why it may find little:\n%s", view)
+	}
+}
+
+func TestCleanupPlanViewWarnsEvenWhenItFoundNothing(t *testing.T) {
+	plan := &cleanupPlan{Scan: &orphanScan{Pool: "NIXROOT", InScope: []string{"home", "root"}}}
+
+	view := buildCleanupPlanView(plan, nil)
+
+	if !strings.Contains(view, "No orphaned snapshots found") {
+		t.Fatalf("expected the nothing-found message:\n%s", view)
+	}
+	if !strings.Contains(view, "no backup scope is set") {
+		t.Errorf("finding nothing is exactly when the reason matters:\n%s", view)
+	}
+}
+
+func TestCleanupPlanViewIsQuietOnceAScopeIsChosen(t *testing.T) {
+	plan := planFixture()
+	plan.Scan.ScopeConfigured = true
+
+	if view := buildCleanupPlanView(plan, nil); strings.Contains(view, "no backup scope is set") {
+		t.Errorf("a configured pool must not be nagged:\n%s", view)
+	}
+}

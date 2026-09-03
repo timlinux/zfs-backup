@@ -251,12 +251,15 @@ func safeToDestroy(decisions []destroyDecision) []string {
 
 // orphanScan is everything doctor and cleanup-orphans need about one pool.
 type orphanScan struct {
-	Pool     string
-	InScope  []string
-	Missing  []string
-	Orphans  []orphanSnapshot
-	Usage    []datasetUsage
-	ScanTime time.Time
+	Pool    string
+	InScope []string
+	// ScopeConfigured is false when the user has never chosen a scope, so
+	// every top-level dataset counts as in scope by default.
+	ScopeConfigured bool
+	Missing         []string
+	Orphans         []orphanSnapshot
+	Usage           []datasetUsage
+	ScanTime        time.Time
 }
 
 // collectOrphanScan performs the read-only inspection shared by the doctor and
@@ -277,14 +280,20 @@ func collectOrphanScan(ctx context.Context, r commandRunner, pool string) (*orph
 		return nil, fmt.Errorf("failed to read space usage for %s: %w", pool, err)
 	}
 
+	configured, err := IsPoolScopeConfigured(pool)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read backup scope for %s: %w", pool, err)
+	}
+
 	now := time.Now()
 	return &orphanScan{
-		Pool:     pool,
-		InScope:  inScope,
-		Missing:  missing,
-		Orphans:  scanOrphans(entries, pool, inScope, now, minSyncoidOrphanAge),
-		Usage:    usage,
-		ScanTime: now,
+		Pool:            pool,
+		InScope:         inScope,
+		ScopeConfigured: configured,
+		Missing:         missing,
+		Orphans:         scanOrphans(entries, pool, inScope, now, minSyncoidOrphanAge),
+		Usage:           usage,
+		ScanTime:        now,
 	}, nil
 }
 
@@ -299,6 +308,10 @@ func renderDoctorReport(scan *orphanScan) (string, int) {
 	var b strings.Builder
 	problems := 0
 
+	if notice := unsetScopeNotice(scan); notice != "" {
+		b.WriteString(notice)
+		b.WriteString("\n")
+	}
 	b.WriteString(describeScope(scan.Pool, scan.InScope, scan.Missing) + "\n")
 	if len(scan.Missing) > 0 {
 		b.WriteString("  These datasets are configured for backup but no longer exist.\n")
@@ -586,6 +599,9 @@ func runCleanupOrphans(ctx context.Context, r commandRunner, opts cleanupOptions
 		return 0
 	}
 
+	if notice := unsetScopeNotice(plan.Scan); notice != "" {
+		fmt.Println(warningStyle.Render(notice))
+	}
 	fmt.Println(infoStyle.Render(describeScope(plan.Scan.Pool, plan.Scan.InScope, plan.Scan.Missing)))
 	fmt.Println(infoStyle.Render("Datasets in scope are never touched by this command."))
 	fmt.Println()
@@ -656,3 +672,25 @@ func runCleanupOrphans(ctx context.Context, r commandRunner, opts cleanupOptions
 // Shown identically by the CLI and the TUI cleanup screen.
 const reclaimCaveat = "Space is only reclaimed once every snapshot pinning a block is gone, so\n" +
 	"usage may barely move until the last few are destroyed."
+
+// unsetScopeNotice explains why a pool full of 1.x debris can look clean.
+//
+// With no scope configured every top-level dataset is in scope, so the
+// -Backup snapshots older versions left on them count as managed and are not
+// reported as orphans. Someone upgrading from 1.x would run the health check,
+// see almost nothing, run the cleanup, reclaim almost nothing, and reasonably
+// conclude the tool does not work. Returns "" once a scope has been chosen.
+func unsetScopeNotice(scan *orphanScan) string {
+	if scan.ScopeConfigured {
+		return ""
+	}
+
+	return fmt.Sprintf(
+		"NOTE: no backup scope is set for %s, so all %d top-level dataset(s) count\n"+
+			"      as in scope and their snapshots are treated as managed. Snapshots\n"+
+			"      left on them by versions before 2.0 are NOT listed below.\n"+
+			"      If you only want some datasets backed up, choose them first\n"+
+			"      (Backup Scope in the menu), then run this again - everything you\n"+
+			"      leave out becomes cleanable.\n",
+		scan.Pool, len(scan.InScope))
+}
