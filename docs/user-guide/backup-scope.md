@@ -95,7 +95,14 @@ accumulate. That is the case worth watching.
 
 Versions before 2.0.0 snapshotted the whole pool recursively but only pruned one
 dataset, so `-Backup` snapshots accumulated on datasets that were never meant to
-be backed up. `cleanup-orphans` removes them.
+be backed up. Cleanup removes them.
+
+The easiest route is **Clean Up Orphaned Snapshots** in the menu, or pressing
+++c++ on the health check screen. The screen opens on a dry run: it lists every
+snapshot it would destroy, what each one uniquely holds, and anything a safety
+check held back. Nothing is destroyed until you press ++d++ and type `DESTROY`.
+
+The same thing is available on the command line for scripting:
 
 ```bash
 sudo zfs-backup cleanup-orphans                    # dry run - destroys nothing
@@ -108,7 +115,9 @@ removed; `--force` skips that prompt for automation.
 
 ### What it refuses to touch
 
-Destroying a snapshot is irreversible, so cleanup will not act on:
+The menu screen and the subcommand share one implementation, so the rules below
+hold identically whichever route you take. Destroying a snapshot is
+irreversible, so cleanup will not act on:
 
 - `@blank` — on NixOS "erase your darlings" installs, `POOL/root@blank` is
   rolled back to on every boot, and destroying it breaks the system;

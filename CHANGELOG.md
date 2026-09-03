@@ -9,6 +9,37 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-03
+
+### Added
+
+- **Orphan cleanup is now a menu option.** Reclaiming the space left behind by
+  the pre-2.0 recursive snapshot bug previously required knowing the
+  `cleanup-orphans` subcommand and its `--yes` flag. It is now a
+  **Clean Up Orphaned Snapshots** item on the main menu, and the
+  **Backup Health Check** screen offers `c` to jump straight from the diagnosis
+  to the cure with the pool already selected.
+- The cleanup screen walks three phases in place rather than in a popup: the
+  dry run (what would be destroyed, what each snapshot uniquely holds, and
+  anything a safety check held back), the typed `DESTROY` confirmation, and the
+  outcome with space usage re-read afterwards.
+- **Backup Scope**, **Backup Health Check** and **Clean Up Orphaned Snapshots**
+  are now documented on the in-app help screen.
+
+### Changed
+
+- The TUI and the `cleanup-orphans` subcommand now share one plan-and-destroy
+  implementation (`buildCleanupPlan`, `renderCleanupPlan`,
+  `destroyPlannedSnapshots`). A snapshot the CLI refuses to touch is equally
+  untouchable from the menu; neither route can drift into being the softer one.
+
+### Safety
+
+- Unchanged from 2.0.0 and now asserted at the shared layer: snapshots are
+  destroyed one at a time, never with a range expression and never recursively;
+  ``, held snapshots, snapshots with dependent clones and in-scope
+  datasets are never touched.
+
 ## [2.0.0] - 2026-08-14
 
 ### Fixed
@@ -187,7 +218,8 @@ is gone, so usage may barely move until the last few are destroyed.
   did not yet exist — destinations are now pre-created with
   `zfs create -p`.
 
-[Unreleased]: https://github.com/timlinux/zfs-backup/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/timlinux/zfs-backup/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/timlinux/zfs-backup/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/timlinux/zfs-backup/compare/v1.6.0...v2.0.0
 [1.6.0]: https://github.com/timlinux/zfs-backup/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/timlinux/zfs-backup/compare/v1.4.0...v1.5.0

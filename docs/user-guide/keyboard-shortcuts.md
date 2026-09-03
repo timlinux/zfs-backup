@@ -42,8 +42,28 @@ Quick reference for all keyboard shortcuts in Kartoza ZFS Backup Tool.
 | Key | Action |
 |-----|--------|
 | ++arrow-up++ / ++k++, ++arrow-down++ / ++j++ | Scroll the report |
+| ++c++ | Go straight to the cleanup screen |
 | ++r++ | Re-run the check |
 | ++escape++ / ++q++ | Return to the menu |
+
+## Clean Up Orphaned Snapshots
+
+The screen opens on a dry run. Nothing is destroyed until you press ++d++ and
+then type `DESTROY`.
+
+| Key | Action |
+|-----|--------|
+| ++arrow-up++ / ++k++, ++arrow-down++ / ++j++ | Scroll the plan |
+| ++d++ | Start the destroy confirmation |
+| ++r++ | Re-scan the pool |
+| ++escape++ / ++q++ | Return to the menu |
+
+During the confirmation:
+
+| Key | Action |
+|-----|--------|
+| `DESTROY` then ++enter++ | Destroy the listed snapshots |
+| ++escape++ | Back out - nothing is destroyed |
 
 ## During Operations
 

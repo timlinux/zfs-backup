@@ -52,9 +52,10 @@ graph TB
 | zfs.go | ZFS operations (backup, prepare, unmount) |
 | datasets.go | Backup scope: the canonical dataset list every phase runs over |
 | snapshots.go | Snapshot naming, creation, pruning and bookmark conversion |
-| doctor.go | Orphan detection, health report, and orphan cleanup |
+| doctor.go | Orphan detection, health report, and the shared cleanup plan / destroy API |
 | runner.go | Command-execution seam so ZFS logic is testable without a pool |
 | scope_tui.go | Backup scope editor and health check screens |
+| cleanup_tui.go | Orphan cleanup screen: dry run, typed confirmation, outcome |
 | state.go | Backup state management for resume functionality |
 | restore.go | Restore mode with dual-panel file explorer |
 | package.nix | Nix package definition |
@@ -293,8 +294,16 @@ stateDiagram-v2
   sync-snapshots older than 24 hours, and datasets whose snapshots consume more
   than half their quota.
 - `doctor` exits 0 when clean and 1 when issues are found.
+- Cleanup is reachable without knowing any command-line flags: a "Clean Up
+  Orphaned Snapshots" main-menu item, and a `c` key on the health check screen
+  that carries the pool straight through.
+- The cleanup screen opens on a dry run, shows what each snapshot uniquely
+  holds and what a safety check held back, and destroys nothing until the user
+  presses `d` and types `DESTROY`.
 - `zfs-backup cleanup-orphans` defaults to a dry run and requires `--yes` plus
   a typed `DESTROY` confirmation (or `--force` for automation) to destroy.
+- The menu screen and the subcommand share one plan-and-destroy implementation,
+  so neither can be a softer path to destruction than the other.
 - Cleanup refuses to destroy: protected snapshots (`@blank`), snapshots with
   holds, snapshots with dependent clones, snapshots on datasets in scope, and
   anything not matching zfs-backup's own naming patterns.
@@ -559,6 +568,7 @@ sudo -E env "PATH=$PATH" go test -tags integration -run TestIntegration -v ./...
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.1.0 | 2026-09 | Orphan cleanup moved into the TUI: a main-menu item and a `c` key on the health check screen, with a dry-run-first screen and typed `DESTROY` confirmation. CLI and TUI now share one cleanup implementation |
 | 2.0.0 | 2026-08 | **Breaking:** snapshot scope now equals replication scope - no more recursive pool snapshots. Per-pool backup scope selection, `doctor` and `cleanup-orphans` subcommands, pruning fixed to cover every dataset, `--no-sync-snap`, failed datasets exit non-zero |
 | 1.6.0 | 2026-06 | Per-snapshot progress tracking, automatic legacy layout migration, unmounted datasets included, Kartoza brand mkdocs theme |
 | 1.5.0 | 2026-05 | Comprehensive PDF and markdown reports with full pool inventory (datasets, sizes, quotas, compression, snapshots), narrative summary, operation log, and next steps |

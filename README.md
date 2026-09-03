@@ -132,7 +132,7 @@ sudo zfs-backup --backup      # Run incremental backup
 sudo zfs-backup --unmount     # Safely unmount backup drive
 sudo zfs-backup --help        # Show help
 
-# Scope, health and cleanup
+# Scope, health and cleanup - all three are also main-menu items
 sudo zfs-backup scope                      # Show which datasets are backed up
 sudo zfs-backup scope --datasets home      # Back up only POOL/home
 sudo zfs-backup doctor                     # Read-only health check
@@ -156,9 +156,11 @@ autosnaps, your own snapshots, and `@blank` are left strictly alone.
 
 > **Upgrading from 1.x?** Versions before 2.0.0 took a recursive snapshot of the
 > whole pool but only pruned one dataset, so `-Backup` snapshots accumulated on
-> datasets that were never meant to be backed up. Run `sudo zfs-backup doctor`
-> to see whether you are affected and `sudo zfs-backup cleanup-orphans` to
-> reclaim the space.
+> datasets that were never meant to be backed up. Open **Backup Health Check**
+> from the menu to see whether you are affected, then press `c` to clean it up -
+> it shows a dry run first and asks you to type `DESTROY` before removing
+> anything. `sudo zfs-backup doctor` and `sudo zfs-backup cleanup-orphans` do
+> the same from a script.
 
 ### quota vs refquota
 
