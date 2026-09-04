@@ -300,3 +300,25 @@ func (s *BackupState) EstimateTimeRemaining(totalStages int) time.Duration {
 
 	return avgTimePerStage * time.Duration(remainingStages)
 }
+
+// revocableStages have effects the world outside zfs-backup can undo between
+// runs: a drive gets unplugged, a pool exported, an encryption key unloaded,
+// the machine rebooted. Recording that such a stage ran once is not evidence
+// that its effect still holds, so a resumed run must re-check rather than
+// skip - otherwise the next stage fails on a pool that is no longer there.
+//
+// Every stage listed here must be idempotent and cheap: each already checks
+// the current state and does nothing when it is already satisfied.
+var revocableStages = map[BackupStage]bool{
+	StageImportPool: true,
+	StageLoadKey:    true,
+}
+
+// ShouldSkipStage reports whether a resumed run may skip a stage it has
+// already completed. Revocable stages are always re-checked.
+func (s *BackupState) ShouldSkipStage(stage BackupStage) bool {
+	if revocableStages[stage] {
+		return false
+	}
+	return s.IsStageCompleted(stage)
+}

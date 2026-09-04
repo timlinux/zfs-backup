@@ -335,7 +335,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 
 	// Helper to execute stage with progress tracking
 	executeStage := func(stageEnum BackupStage, stageName string, fn func() error) error {
-		if state.IsStageCompleted(stageEnum) {
+		if state.ShouldSkipStage(stageEnum) {
 			output.WriteString(fmt.Sprintf("✓ Skipping completed stage: %s\n", stageName))
 			currentStage++
 			return nil
@@ -397,18 +397,8 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 		output.WriteString("   read or written. Data at rest remains encrypted on disk.\n")
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
-		keyStatus, err := getKeyStatus(destPool)
-		if err != nil {
-			return fmt.Errorf("failed to check key status: %w", err)
-		}
-
-		if keyStatus != "available" {
-			output.WriteString(fmt.Sprintf("Loading encryption key (status: %s)\n", keyStatus))
-			if err := loadZFSKey(destPool, password); err != nil {
-				return fmt.Errorf("failed to load encryption key: %w", err)
-			}
-		} else {
-			output.WriteString("[OK]Encryption key is already loaded\n")
+		if err := ensurePoolKeyLoaded(destPool, password, &output); err != nil {
+			return err
 		}
 		return nil
 	})
@@ -705,7 +695,7 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 
 	// Helper to execute stage with progress tracking
 	executeStage := func(stageEnum BackupStage, stageName string, fn func() error) error {
-		if state.IsStageCompleted(stageEnum) {
+		if state.ShouldSkipStage(stageEnum) {
 			output.WriteString(fmt.Sprintf("✓ Skipping completed stage: %s\n", stageName))
 			currentStage++
 			return nil
@@ -1100,18 +1090,8 @@ func performRecover(ctx context.Context, password, sourcePool, destPool string, 
 	output.WriteString("   Loading the encryption key to access the backup pool.\n")
 	output.WriteString("-----------------------------------------------------------\n\n")
 
-	keyStatus, err := getKeyStatus(destPool)
-	if err != nil {
-		return output.String(), fmt.Errorf("failed to check key status: %w", err)
-	}
-
-	if keyStatus != "available" {
-		output.WriteString(fmt.Sprintf("Loading encryption key (status: %s)\n", keyStatus))
-		if err := loadZFSKey(destPool, password); err != nil {
-			return output.String(), fmt.Errorf("failed to load encryption key: %w", err)
-		}
-	} else {
-		output.WriteString("[OK] Encryption key is already loaded\n")
+	if err := ensurePoolKeyLoaded(destPool, password, &output); err != nil {
+		return output.String(), err
 	}
 
 	// Stage 3: Abort partial receive state
@@ -1314,7 +1294,7 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 	}
 
 	executeStage := func(stageEnum BackupStage, stageName string, fn func() error) error {
-		if state.IsStageCompleted(stageEnum) {
+		if state.ShouldSkipStage(stageEnum) {
 			output.WriteString(fmt.Sprintf("Skipping completed stage: %s\n", stageName))
 			currentStage++
 			return nil
@@ -1371,18 +1351,8 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 		output.WriteString("   Loading the encryption key for the backup pool.\n")
 		output.WriteString("-----------------------------------------------------------\n\n")
 
-		keyStatus, err := getKeyStatus(destPool)
-		if err != nil {
-			return fmt.Errorf("failed to check key status: %w", err)
-		}
-
-		if keyStatus != "available" {
-			output.WriteString(fmt.Sprintf("Loading encryption key (status: %s)\n", keyStatus))
-			if err := loadZFSKey(destPool, password); err != nil {
-				return fmt.Errorf("failed to load encryption key: %w", err)
-			}
-		} else {
-			output.WriteString("[OK] Encryption key is already loaded\n")
+		if err := ensurePoolKeyLoaded(destPool, password, &output); err != nil {
+			return err
 		}
 		return nil
 	})
@@ -1636,7 +1606,7 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 	}
 
 	executeStage := func(stageEnum BackupStage, stageName string, fn func() error) error {
-		if state.IsStageCompleted(stageEnum) {
+		if state.ShouldSkipStage(stageEnum) {
 			output.WriteString(fmt.Sprintf("Skipping completed stage: %s\n", stageName))
 			currentStage++
 			return nil
@@ -1863,17 +1833,51 @@ func runCommandOutput(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("%s failed: %w", name, err)
+		// ZFS explains itself on stderr - "cannot open 'POOL': dataset does not
+		// exist" and the like. Reporting only "exit status 1" turns a
+		// self-explaining failure into a support question, so keep the text.
+		return "", fmt.Errorf("%s failed: %w%s", name, err, formatCommandOutput(output))
 	}
 	return string(output), nil
 }
 
+// formatCommandOutput renders captured command output for an error message,
+// collapsing it onto one line when it is short enough to read inline.
+func formatCommandOutput(output []byte) string {
+	text := strings.TrimSpace(string(output))
+	if text == "" {
+		return ""
+	}
+	if !strings.Contains(text, "\n") {
+		return ": " + text
+	}
+	return "\nOutput: " + text
+}
+
 func isPoolImported(poolName string) (bool, error) {
-	output, err := runCommandOutput("zpool", "list")
+	// -H -o name gives one bare pool name per line. Matching against the full
+	// `zpool list` table instead meant a substring hit anywhere - a longer pool
+	// name, a column heading, a size - counted as "imported", so the import was
+	// skipped and the next stage talked to a pool that was not there.
+	output, err := runCommandOutput("zpool", "list", "-H", "-o", "name")
 	if err != nil {
 		return false, err
 	}
-	return strings.Contains(output, poolName), nil
+	return poolListContains(output, poolName), nil
+}
+
+// poolListContains reports whether a pool name appears as a whole line in the
+// output of `zpool list -H -o name`.
+func poolListContains(output, poolName string) bool {
+	if poolName == "" {
+		return false
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == poolName {
+			return true
+		}
+	}
+	return false
 }
 
 // isZFSReceiveRunning checks if there's an active zfs receive process for the given dataset
@@ -2514,4 +2518,31 @@ func generateBackupReport(sourcePool, destPool string, datasets []string) (strin
 	}
 
 	return reportBoxStyle.Render(report.String()), nil
+}
+
+// ensurePoolKeyLoaded makes the destination pool's encryption key available.
+//
+// It is a no-op on an unencrypted pool: ZFS reports a keystatus of "-" for a
+// dataset that has no encryption at all, which is not the same as a key that
+// simply is not loaded yet. Treating the two alike would send us to
+// loadZFSKey with a passphrase for a pool that has no key to load.
+func ensurePoolKeyLoaded(destPool, password string, output *strings.Builder) error {
+	keyStatus, err := getKeyStatus(destPool)
+	if err != nil {
+		return fmt.Errorf("failed to check key status for %s: %w", destPool, err)
+	}
+
+	switch keyStatus {
+	case "available":
+		output.WriteString("[OK] Encryption key is already loaded\n")
+	case "-", "":
+		output.WriteString("[OK] Pool is not encrypted - no key needed\n")
+	default:
+		output.WriteString(fmt.Sprintf("Loading encryption key (status: %s)\n", keyStatus))
+		if err := loadZFSKey(destPool, password); err != nil {
+			return fmt.Errorf("failed to load encryption key for %s: %w", destPool, err)
+		}
+	}
+
+	return nil
 }
