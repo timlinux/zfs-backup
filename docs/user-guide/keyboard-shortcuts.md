@@ -27,6 +27,25 @@ Quick reference for all keyboard shortcuts in Kartoza ZFS Backup Tool.
 | ++n++ | No / Cancel |
 | ++escape++ | Cancel and go back |
 
+## Pool Recovery
+
+Reached from the menu, or with ++f++ when an operation fails because a pool
+stopped responding.
+
+| Key | Action |
+|-----|--------|
+| ++enter++ | Run the next recovery step |
+| ++r++ | Re-check the pool |
+| ++arrow-up++ / ++k++, ++arrow-down++ / ++j++ | Scroll the diagnosis |
+| ++escape++ / ++q++ | Return to the menu |
+
+When a step needs confirming:
+
+| Key | Action |
+|-----|--------|
+| ++y++ | Run it |
+| ++n++ / ++escape++ | Leave the pool alone |
+
 ## Backup Scope
 
 | Key | Action |

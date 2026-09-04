@@ -56,6 +56,8 @@ graph TB
 | runner.go | Command-execution seam so ZFS logic is testable without a pool |
 | scope_tui.go | Backup scope editor and health check screens |
 | cleanup_tui.go | Orphan cleanup screen: dry run, typed confirmation, outcome |
+| recovery.go | Pool health classification and the recovery escalation ladder |
+| recovery_tui.go | Guided pool recovery screen |
 | state.go | Backup state management for resume functionality |
 | restore.go | Restore mode with dual-panel file explorer |
 | package.nix | Nix package definition |
@@ -568,7 +570,7 @@ sudo -E env "PATH=$PATH" go test -tags integration -run TestIntegration -v ./...
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 2.1.0 | 2026-09 | Fixed layout migration failing when a dataset shares the hostname's name, and blocked backing a pool up onto itself. Orphan cleanup moved into the TUI: a main-menu item and a `c` key on the health check screen, with a dry-run-first screen and typed `DESTROY` confirmation. CLI and TUI now share one cleanup implementation |
+| 2.1.0 | 2026-09 | Guided in-app pool recovery for a suspended pool; build commit shown beside the version. Fixed layout migration failing when a dataset shares the hostname's name, and blocked backing a pool up onto itself. Orphan cleanup moved into the TUI: a main-menu item and a `c` key on the health check screen, with a dry-run-first screen and typed `DESTROY` confirmation. CLI and TUI now share one cleanup implementation |
 | 2.0.0 | 2026-08 | **Breaking:** snapshot scope now equals replication scope - no more recursive pool snapshots. Per-pool backup scope selection, `doctor` and `cleanup-orphans` subcommands, pruning fixed to cover every dataset, `--no-sync-snap`, failed datasets exit non-zero |
 | 1.6.0 | 2026-06 | Per-snapshot progress tracking, automatic legacy layout migration, unmounted datasets included, Kartoza brand mkdocs theme |
 | 1.5.0 | 2026-05 | Comprehensive PDF and markdown reports with full pool inventory (datasets, sizes, quotas, compression, snapshots), narrative summary, operation log, and next steps |

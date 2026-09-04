@@ -13,6 +13,16 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A pool that stops responding can now be fixed from the app.** When ZFS
+  suspends I/O to a pool, the failure screen offers `f` to open a guided
+  recovery, and there is a **Fix a Pool That Stopped Responding** menu item.
+  It diagnoses the pool, then works through the remedies gentlest first -
+  `zpool clear`, then a forced export and re-import - re-checking the pool
+  after each and stopping as soon as it is back. Nothing in the ladder
+  destroys data, the forceful step asks first, and every command runs under a
+  45-second deadline because commands against a wedged pool can otherwise
+  block in the kernel forever. When the ladder is exhausted it says what is
+  left to check by hand.
 - **The version header now shows the commit the binary was built from**, e.g.
   `Version 2.1.0 (fa247f7)`. A version number alone cannot tell you whether a
   rebuild actually took effect. The flake, `package.nix` and the Makefile all
