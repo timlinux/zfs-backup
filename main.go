@@ -50,11 +50,15 @@ const (
 
 // Kartoza brand colors
 var (
-	colorHighlight1 = lipgloss.Color("#DF9E2F") // Primary gold/orange
-	colorHighlight2 = lipgloss.Color("#569FC6") // Blue
-	colorHighlight3 = lipgloss.Color("#8A8B8B") // Gray
-	colorHighlight4 = lipgloss.Color("#06969A") // Teal
-	colorAlert      = lipgloss.Color("#CC0403") // Red alert
+	// Brand-derived, dark-legible values. Sources: docs/stylesheets/
+	// kartoza-tokens.css. Success and error are tints of the brand status
+	// tokens chosen to clear WCAG AA (4.5:1) on the #1E1E1E background -
+	// the raw tokens are tuned for light surfaces and fail on dark.
+	colorHighlight1 = lipgloss.Color("#EEB348") // Kartoza amber (--kartoza-amber / --status-warn)
+	colorHighlight2 = lipgloss.Color("#54A2CC") // Kartoza blue (--kartoza-blue)
+	colorHighlight3 = lipgloss.Color("#8A8B8B") // Kartoza grey (--kartoza-grey)
+	colorHighlight4 = lipgloss.Color("#5FA87A") // Success - dark-legible tint of --status-success #3C7D54
+	colorAlert      = lipgloss.Color("#D9695C") // Error - dark-legible tint of --status-error #B0473C
 	colorBackground = lipgloss.Color("#1E1E1E") // Dark background
 	colorForeground = lipgloss.Color("#FFFFFF") // White text
 )
@@ -136,6 +140,12 @@ var (
 			Foreground(colorHighlight3).
 			Italic(true).
 			MarginBottom(1)
+
+	// mutedStyle is subtitleStyle without the bottom margin, for muted text
+	// inside lists and tables where a phantom blank line breaks the layout.
+	mutedStyle = lipgloss.NewStyle().
+			Foreground(colorHighlight3).
+			Italic(true)
 
 	statusStyle = lipgloss.NewStyle().
 			Foreground(colorHighlight4).
@@ -310,11 +320,12 @@ func renderFooter(width int, hotkeys string, currentPage, totalPages int) string
 	b.WriteString(line2 + "\n")
 
 	// Kartoza credit line with hotkeys - centered
-	// Format: Made with <3 by [K]artoza | D[o]nate! | [G]itHub
-	kartoza := selectedItemStyle.Render("K") + footerCreditStyle.Render("artoza")
-	donate := footerCreditStyle.Render("D") + selectedItemStyle.Render("o") + footerCreditStyle.Render("nate!")
-	github := selectedItemStyle.Render("G") + footerCreditStyle.Render("itHub")
-	credit := footerCreditStyle.Render("Made with <3 by ") + kartoza +
+	// Format: Made with ♥ by [K]artoza | D[o]nate! | [G]itHub. The brackets
+	// make the link keys readable without colour.
+	kartoza := footerCreditStyle.Render("[") + selectedItemStyle.Render("K") + footerCreditStyle.Render("]artoza")
+	donate := footerCreditStyle.Render("D[") + selectedItemStyle.Render("o") + footerCreditStyle.Render("]nate!")
+	github := footerCreditStyle.Render("[") + selectedItemStyle.Render("G") + footerCreditStyle.Render("]itHub")
+	credit := footerCreditStyle.Render("Made with ♥ by ") + kartoza +
 		footerCreditStyle.Render(" │ ") + donate +
 		footerCreditStyle.Render(" │ ") + github
 
@@ -399,6 +410,9 @@ func (m model) getHotkeys() string {
 	case stateConfirm:
 		return "y confirm • n cancel • esc back"
 	case stateInput, statePassword:
+		if m.operation == "prepare" {
+			return "enter submit • esc back"
+		}
 		return "enter submit • esc cancel"
 	case stateRunning:
 		return "ctrl+c cancel (resumable)"
@@ -420,7 +434,7 @@ func (m model) getHotkeys() string {
 	case stateDevicePick:
 		return "↑/k up • ↓/j down • enter choose • r rescan • esc cancel"
 	case stateTypedConfirm:
-		return "type the word • enter confirm • esc cancel"
+		return fmt.Sprintf("type %s • enter confirm • esc back", m.typedConfirmWord)
 	case stateMaintenance:
 		return "s start scrub • x stop scrub • r refresh • esc return"
 	case stateQuotaManage:
@@ -477,6 +491,8 @@ type model struct {
 	confirmYes    bool
 	quitting      bool
 	showingHelp   bool
+	helpViewport  viewport.Model // Scrolling help body
+	helpReady     bool           // Has the viewport been sized?
 	password      string
 	devicePath    string
 	backupState   *BackupState
@@ -524,6 +540,7 @@ type model struct {
 	cleanupPhase    cleanupPhase   // Plan, confirm, running or done
 	cleanupOutcome  cleanupOutcome // What the destroy run actually did
 	cleanupMessage  string         // Inline validation / abort message
+	cleanupPlanBody string         // Rendered dry-run body, restored after esc from confirm
 	// Guided pool recovery
 	recoverPool     string         // Pool being recovered
 	recoverHealth   poolHealth     // Latest diagnosis
@@ -538,6 +555,7 @@ type model struct {
 	deviceCandidates   []deviceCandidate // Vetted disks for prepare
 	deviceIndex        int               // Cursor in the disk list
 	devicePickReady    bool              // Is the disk list loaded?
+	devicePickNote     string            // Why the last enter was refused
 	typedConfirmTitle  string            // Headline of the confirmation
 	typedConfirmDetail string            // What exactly will happen
 	typedConfirmWord   string            // What must be typed
@@ -1272,6 +1290,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "enter", "esc", "q":
 				m.showingHelp = false
+				m.helpReady = false
 				return m, nil
 			case "ctrl+c":
 				m.quitting = true
@@ -1279,8 +1298,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "D":
 				// Open online documentation
 				return m, openURL(docsURL)
+			default:
+				if m.helpReady {
+					var cmd tea.Cmd
+					m.helpViewport, cmd = m.helpViewport.Update(msg)
+					return m, cmd
+				}
+				return m, nil
 			}
-			return m, nil
 		}
 
 		if m.state == stateMenu {
@@ -1341,9 +1366,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.menuFilter = ""
 				return m, nil
 
+			case "esc":
+				// A committed filter must be clearable without re-entering
+				// filter mode.
+				if m.menuFilter != "" {
+					m.menuFilter = ""
+					rows := visibleMenuRows("")
+					m.menuIndex = clampMenuCursor(rows, m.menuIndex)
+				}
+				return m, nil
+
 			case "?":
 				// Show help
 				m.showingHelp = true
+				m.helpViewport = newReportViewport(m.width, m.height, helpText())
+				m.helpReady = true
 				return m, nil
 
 			case "K":
@@ -1410,10 +1447,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.restoreModel.height = m.height
 					return m, nil
 				case "Force Full Backup":
-					m.state = stateConfirm
-					m.confirmMsg = "WARNING: This will delete all previous snapshots on the backup disk.\nAre you sure you want to continue?"
+					// No pre-emptive y/n here: the real gate is the typed DESTROY
+					// once the destination pool is known and can be named.
 					m.operation = "force-backup"
-					m.confirmYes = false
+					m.startPoolSelection(true)
 					return m, nil
 				case "Prepare Backup Device":
 					// The disk is chosen from a vetted picker, never typed from
@@ -1471,16 +1508,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "y", "Y":
 				m.confirmYes = true
-				// Check if this operation needs pool selection then password
-				if m.operation == "force-backup" {
-					// Go to pool selection - set state to stateMenu
-					// so the pool selection UI renders correctly
-					m.state = stateMenu
-					m.startPoolSelection(true)
-					return m, nil
-				}
-				// NOTE: prepare never passes through this y/n screen any more -
-				// it goes picker -> pool name -> typed disk-name confirmation.
+				// NOTE: neither destructive flow passes through this y/n screen
+				// any more - both end at a typed confirmation instead.
 				return m.startOperation()
 			case "n", "N", "esc":
 				m.state = stateMenu
@@ -1545,9 +1574,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 			case "esc":
+				// In the prepare wizard, esc steps back one stage instead of
+				// discarding the disk selection and starting over.
+				if m.operation == "prepare" && m.preparePhase == 1 {
+					m.state = stateDevicePick
+					m.input.Blur()
+					return m, nil
+				}
 				m.state = stateMenu
 				return m, nil
-			case "ctrl+c", "q":
+			case "ctrl+c":
 				m.quitting = true
 				return m, tea.Quit
 			}
@@ -1570,11 +1606,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m.startOperation()
 				}
 			case "esc":
-				m.state = stateMenu
 				m.password = ""
 				m.passwordInput.SetValue("")
+				if m.operation == "prepare" {
+					if candidate, found := findCandidate(m.deviceCandidates, m.devicePath); found {
+						m = m.startTypedConfirm(
+							"THIS DISK WILL BE ERASED",
+							prepareConfirmDetail(candidate, m.destPool),
+							wipeConfirmationWord(m.devicePath))
+						return m, textinput.Blink
+					}
+				}
+				m.state = stateMenu
 				return m, nil
-			case "ctrl+c", "q":
+			case "ctrl+c":
 				m.quitting = true
 				return m, tea.Quit
 			}
@@ -2041,8 +2086,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cleanupPool = msg.pool
 		m.cleanupPlan = msg.plan
 		m.cleanupPhase = cleanupPhasePlan
-		m.cleanupViewport = newReportViewport(m.width, m.height,
-			buildCleanupPlanView(msg.plan, msg.preview))
+		m.cleanupPlanBody = buildCleanupPlanView(msg.plan, msg.preview)
+		m.cleanupViewport = newReportViewport(m.width, m.height, m.cleanupPlanBody)
 		m.cleanupReady = true
 		return m, nil
 
@@ -2341,7 +2386,7 @@ func (m model) View() string {
 	// Override for help state
 	if m.showingHelp {
 		status = "Help"
-		hotkeys = "enter/esc return to menu"
+		hotkeys = "scroll ↑/↓ j/k pgup/pgdn • D online docs • enter/esc return to menu"
 	}
 
 	// Render components
@@ -2352,6 +2397,12 @@ func (m model) View() string {
 		content = m.renderHelpContent(width)
 	} else {
 		content = m.renderContentNopad(width)
+	}
+	// The footer must start on its own line: a content block without a
+	// trailing newline used to fuse with the footer rule into one
+	// double-width line that wrapped and shredded the footer.
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
 	}
 
 	// Count lines used
@@ -2626,12 +2677,14 @@ func (m model) renderInputContent(width int) string {
 		}
 	} else {
 		titleText = "Prepare Backup Device"
-		if m.preparePhase == 0 {
-			promptText = "Enter the device path to use for backup:"
-			hintText = "Example: /dev/sda"
-		} else {
-			promptText = fmt.Sprintf("Enter the pool name (device: %s):", m.devicePath)
-			hintText = "Default: NIXBACKUPS (press Enter to use default)"
+		promptText = fmt.Sprintf("Name the new pool that will replace everything on %s:", m.devicePath)
+		hintText = fmt.Sprintf("%s will be ERASED. Default name: NIXBACKUPS", m.devicePath)
+		if candidate, found := findCandidate(m.deviceCandidates, m.devicePath); found {
+			model := strings.TrimSpace(candidate.Device.Model)
+			if model != "" {
+				hintText = fmt.Sprintf("%s (%s, %s) will be ERASED. Default name: NIXBACKUPS",
+					m.devicePath, formatSize(candidate.Device.Size), model)
+			}
 		}
 	}
 
@@ -3267,11 +3320,10 @@ func (m model) renderResultContent(width int) string {
 }
 
 // renderHelpContent renders the help screen
-func (m model) renderHelpContent(width int) string {
-	help := `DESCRIPTION
-  A beautiful TUI for managing ZFS backups.
-
-OPERATIONS
+// helpText is the in-app help body. Shown inside a scrolling viewport, since
+// it is far taller than a 24-row terminal.
+func helpText() string {
+	return `OPERATIONS
   Back Up Now
      Performs an incremental backup using syncoid.
 
@@ -3284,12 +3336,13 @@ OPERATIONS
      Pushes local ZFS snapshots to a remote backup server via SSH.
      Datasets are namespaced by local hostname on the remote pool.
 
-  Force Full Backup
-     Deletes backup history and rebuilds from the current source
-     state. Guarded by a typed DESTROY confirmation.
-
   Restore Files
      Browse snapshots and restore files to any location.
+     Existing files are only overwritten after you confirm.
+
+  Browse Backup Reports
+     Read the reports previous backup runs wrote: timings, sizes,
+     and any errors. Changes nothing.
 
   Pool Information
      Displays detailed pool structure, status and health.
@@ -3324,31 +3377,60 @@ OPERATIONS
      snapshots with clones and protected snapshots are never
      destroyed.
 
+  Recover Failed Backup
+     Fixes broken sync state after a backup was interrupted or a
+     snapshot was deleted mid-send.
+
   Prepare Backup Device
      Erases a disk and creates an encrypted ZFS pool on it. The
      disk comes from a vetted picker - anything mounted, in an
      imported pool, or holding the running system is refused -
      and you must type the disk's own name to proceed.
 
+  Force Full Backup
+     Deletes backup history and rebuilds from the current source
+     state. Guarded by a typed DESTROY confirmation.
+
   Unmount Backup Disk
      Safely exports the pool and powers off the USB drive.
 
+KEYS
+  Up/Down or k/j     Move
+  Enter              Select / confirm
+  /                  Filter the main menu as you type
+  Esc                Back one step, or clear the menu filter
+  ?                  This help
+  q                  Quit (from the menu; typing screens use Ctrl+C)
+  Ctrl+C             Quit from anywhere
+  D                  Open the online documentation
+  K / o / G          Kartoza site / Donate / GitHub
+
 REQUIREMENTS
-  • syncoid installed (from sanoid package)
-  • ZFS filesystem with source pool
-  • External drive for backup pool
-  • Root privileges (sudo) OR ZFS delegation configured
+  - syncoid installed (from sanoid package)
+  - ZFS filesystem with source pool
+  - External drive for backup pool
+  - Root privileges (sudo) OR ZFS delegation configured
 
 DOCUMENTATION
   Press D to open online documentation
-  https://timlinux.github.io/zfs-backup
+  https://timlinux.github.io/zfs-backup`
+}
 
-Press esc/enter/q to return to menu`
-
-	return lipgloss.NewStyle().
-		Width(width).
-		Align(lipgloss.Center).
-		Render(reportBoxStyle.Render(help))
+// renderHelpContent renders the help screen inside its scrolling viewport.
+func (m model) renderHelpContent(width int) string {
+	if !m.helpReady {
+		return lipgloss.NewStyle().Width(width).Align(lipgloss.Center).
+			Render(reportBoxStyle.Render(helpText()))
+	}
+	var b strings.Builder
+	b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center, m.helpViewport.View()))
+	b.WriteString("\n")
+	if !m.helpViewport.AtBottom() {
+		b.WriteString(lipgloss.NewStyle().Width(width).Align(lipgloss.Center).
+			Render(subtitleStyle.Render(fmt.Sprintf("▼ more below | %d%%", int(m.helpViewport.ScrollPercent()*100)))))
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // loadZpoolInfo returns a command that fetches zpool info asynchronously
@@ -4438,7 +4520,7 @@ Commands:
                         datasets whose quota is being eaten by snapshots
     --pool POOL         Pool to check (default: auto-detected source pool)
 
-  cleanup-orphans       Remove snapshots left behind by older versions
+  cleanup-orphans       Destroy snapshots left behind by older versions
     --pool POOL         Pool to clean (default: auto-detected source pool)
     --dataset DATASET   Restrict cleanup to one dataset
     --yes               Actually destroy (dry run is the default)
@@ -4465,7 +4547,7 @@ Note: If you have ZFS delegation configured for your user, you can omit sudo.`
 	// Footer
 	fmt.Println()
 	fmt.Println(interstitialStyle.Render(strings.Repeat("─", 50)))
-	fmt.Println(footerCreditStyle.Render("Made with <3 by Kartoza | Donate! | GitHub"))
+	fmt.Println(footerCreditStyle.Render("Made with ♥ by Kartoza | Donate! | GitHub"))
 	fmt.Println()
 }
 

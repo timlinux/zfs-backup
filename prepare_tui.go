@@ -58,11 +58,13 @@ func (m model) updateDevicePickScreen(msg tea.KeyMsg) (model, tea.Cmd) {
 		if m.deviceIndex > 0 {
 			m.deviceIndex--
 		}
+		m.devicePickNote = ""
 		return m, nil
 	case "down", "j":
 		if m.deviceIndex < len(m.deviceCandidates)-1 {
 			m.deviceIndex++
 		}
+		m.devicePickNote = ""
 		return m, nil
 	case "enter":
 		if m.deviceIndex >= len(m.deviceCandidates) {
@@ -70,9 +72,12 @@ func (m model) updateDevicePickScreen(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 		candidate := m.deviceCandidates[m.deviceIndex]
 		if !candidate.Selectable() {
-			// The refusal is the feature: the reason is already on the line.
+			// Silence on enter is a dead end; say why this disk is refused.
+			m.devicePickNote = fmt.Sprintf("%s cannot be erased: %s.",
+				candidate.Device.Path(), candidate.Vetoes[0].Reason)
 			return m, nil
 		}
+		m.devicePickNote = ""
 		m.devicePath = candidate.Device.Path()
 		// On to the pool name, then the typed confirmation.
 		m.state = stateInput
@@ -85,6 +90,13 @@ func (m model) updateDevicePickScreen(msg tea.KeyMsg) (model, tea.Cmd) {
 	return m, nil
 }
 
+// devicePickBlockWidth is the fixed inner width of the picker list. The list
+// is laid out left-aligned inside this block and the block is centred as a
+// whole - centring row by row would put the size column at a different
+// offset on every line, on the one screen where reading the right row is
+// everything.
+const devicePickBlockWidth = 66
+
 // renderDevicePickContent draws the disk picker.
 func (m model) renderDevicePickContent(width int) string {
 	centre := lipgloss.NewStyle().Width(width).Align(lipgloss.Center)
@@ -94,41 +106,70 @@ func (m model) renderDevicePickContent(width int) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(centre.Render(selectedItemStyle.Render("Choose the disk to prepare")))
+	b.WriteString(selectedItemStyle.Render("Choose the disk to prepare"))
 	b.WriteString("\n\n")
-	b.WriteString(centre.Render(warningStyle.Render(
-		"The chosen disk will be completely erased.")))
+	b.WriteString(warningStyle.Render("The chosen disk will be completely erased."))
 	b.WriteString("\n")
-	b.WriteString(centre.Render(subtitleStyle.Render(
-		"Disks the system is using are listed but cannot be chosen.")))
+	b.WriteString(mutedStyle.Render("Disks marked ✗ are in use and cannot be chosen."))
 	b.WriteString("\n\n")
 
 	if len(m.deviceCandidates) == 0 {
-		b.WriteString(centre.Render(warningStyle.Render(
-			"No disks found. Attach the backup drive and press r.")))
+		b.WriteString(warningStyle.Render("No disks found. Attach the backup drive and press r."))
 		b.WriteString("\n")
-		return b.String()
 	}
 
 	for i, candidate := range m.deviceCandidates {
+		marker := "  "
+		if !candidate.Selectable() {
+			marker = "✗ "
+		}
 		cursor := "  "
 		if i == m.deviceIndex {
-			cursor = "> "
+			cursor = "▌ "
 		}
-		line := cursor + candidate.Describe()
+
+		model := strings.TrimSpace(candidate.Device.Model)
+		if model == "" {
+			model = "unknown model"
+		}
+		kind := "internal"
+		if candidate.Device.Removable {
+			kind = "removable"
+		}
+		line := fmt.Sprintf("%s%s%-14s %9s  %s (%s)",
+			cursor, marker, candidate.Device.Path(),
+			formatSize(candidate.Device.Size), model, kind)
+
 		switch {
 		case !candidate.Selectable():
-			line = subtitleStyle.Render(line)
+			b.WriteString(mutedStyle.Render(line))
 		case i == m.deviceIndex:
-			line = selectedItemStyle.Render(line)
+			b.WriteString(selectedItemStyle.Render(line))
 		default:
-			line = infoStyle.Render(line)
+			b.WriteString(infoStyle.Render(line))
 		}
-		b.WriteString(centre.Render(line))
+		b.WriteString("\n")
+
+		// The refusal reason hangs indented under its own disk, wrapped to
+		// the block, so it can never detach from the row it belongs to.
+		for _, veto := range candidate.Vetoes {
+			reason := lipgloss.NewStyle().Width(devicePickBlockWidth - 8).
+				Render(veto.Reason)
+			for _, rl := range strings.Split(reason, "\n") {
+				b.WriteString(mutedStyle.Render("        " + rl))
+				b.WriteString("\n")
+			}
+		}
+	}
+
+	if m.devicePickNote != "" {
+		b.WriteString("\n")
+		b.WriteString(warningStyle.Render(m.devicePickNote))
 		b.WriteString("\n")
 	}
 
-	return b.String()
+	block := lipgloss.NewStyle().Width(devicePickBlockWidth).Render(b.String())
+	return lipgloss.PlaceHorizontal(width, lipgloss.Center, block)
 }
 
 // =============================================================================
@@ -143,7 +184,9 @@ func (m model) startTypedConfirm(title, detail, word string) model {
 	m.typedConfirmWord = word
 	m.typedConfirmError = ""
 	m.input.SetValue("")
-	m.input.Placeholder = word
+	// The instruction line names the word; the field must not also show it,
+	// or the confirmation reads as pre-filled and becomes "press enter twice".
+	m.input.Placeholder = ""
 	m.input.Focus()
 	return m
 }
@@ -155,9 +198,19 @@ func (m model) updateTypedConfirmScreen(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.quitting = true
 		return m, tea.Quit
 	case "esc":
-		m.state = stateMenu
 		m.input.Blur()
 		m.input.SetValue("")
+		if m.operation == "prepare" {
+			// Back one stage: re-open the pool-name input with the chosen
+			// name still in place.
+			m.state = stateInput
+			m.preparePhase = 1
+			m.input.Placeholder = "NIXBACKUPS"
+			m.input.SetValue(m.destPool)
+			m.input.Focus()
+			return m, textinput.Blink
+		}
+		m.state = stateMenu
 		return m, nil
 	case "enter":
 		if strings.TrimSpace(m.input.Value()) != m.typedConfirmWord {
@@ -193,15 +246,26 @@ func (m model) afterTypedConfirm() (model, tea.Cmd) {
 	return m, nil
 }
 
-// renderTypedConfirmContent draws the typed-confirmation screen.
+// renderTypedConfirmContent draws the typed-confirmation screen. The chrome
+// is deliberately flat: the default warning and report boxes spend six rows
+// each on borders, padding and margins, which pushed the banner - the
+// loudest safety signal on the most dangerous screen - off an 80x24
+// terminal.
 func (m model) renderTypedConfirmContent(width int) string {
 	centre := lipgloss.NewStyle().Width(width).Align(lipgloss.Center)
 
+	banner := dangerBanner(m.typedConfirmTitle)
+	detailBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorAlert).
+		Padding(0, 2).
+		Render(m.typedConfirmDetail)
+
 	var b strings.Builder
-	b.WriteString(centre.Render(destructiveWarningStyle.Render("  " + m.typedConfirmTitle + "  ")))
-	b.WriteString("\n\n")
-	b.WriteString(centre.Render(reportBoxStyle.Render(m.typedConfirmDetail)))
-	b.WriteString("\n\n")
+	b.WriteString(centre.Render(banner))
+	b.WriteString("\n")
+	b.WriteString(centre.Render(detailBox))
+	b.WriteString("\n")
 	b.WriteString(centre.Render(warningStyle.Render(
 		fmt.Sprintf("Type %s and press enter to continue.", m.typedConfirmWord))))
 	b.WriteString("\n")
@@ -231,10 +295,23 @@ func prepareConfirmDetail(candidate deviceCandidate, poolName string) string {
 func forceBackupConfirmDetail(destPool string) string {
 	return fmt.Sprintf(
 		"Pool:  %s\n\n"+
-			"Every existing backup snapshot on %s will be deleted and the\n"+
-			"backup rebuilt from the current state of the source. Older\n"+
-			"versions of your files, held only by those snapshots, are lost.\n\n"+
-			"Use this only when the incremental chain is broken - the\n"+
-			"ordinary backup never needs it.",
+			"Every existing backup snapshot on %s will be deleted and\n"+
+			"the backup rebuilt from the current source state. Older file\n"+
+			"versions held only by those snapshots are lost. Use this only\n"+
+			"when the incremental chain is broken - the ordinary backup\n"+
+			"never needs it.",
 		destPool, destPool)
+}
+
+// dangerBanner renders the one-line destructive warning. One row, high
+// contrast - the boxed variant spent six rows on chrome and pushed the
+// content it was warning about off small terminals.
+func dangerBanner(text string) string {
+	return lipgloss.NewStyle().
+		// Dark text, not white: white on #D9695C is 3.43:1, below AA.
+		Foreground(colorBackground).
+		Background(colorAlert).
+		Bold(true).
+		Padding(0, 2).
+		Render(text)
 }

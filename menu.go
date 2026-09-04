@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -255,7 +256,9 @@ func safetyBadge(s menuSafety) string {
 	case menuDestructive:
 		return errorStyle.Render("● destructive")
 	default:
-		return infoStyle.Render("● makes changes")
+		// Amber, not body-text blue: "makes changes" is the middle caution
+		// level, and the badge triple maps onto success / warn / error.
+		return warningStyle.Render("● makes changes")
 	}
 }
 
@@ -266,10 +269,52 @@ const menuListWidth = 44
 const twoPaneMinWidth = 96
 
 // renderMenu draws the menu: two panes when the terminal allows, a single
-// grouped list when it does not. Never overflows horizontally.
+// grouped list when it does not. Never overflows horizontally, and windows
+// the list vertically so the header and footer stay on screen at 80x24.
 func (m model) renderMenu(width int) string {
-	rows := visibleMenuRows(m.menuFilter)
-	cursor := clampMenuCursor(rows, m.menuIndex)
+	allRows := visibleMenuRows(m.menuFilter)
+	fullCursor := clampMenuCursor(allRows, m.menuIndex)
+
+	// The frame (header, tagline, rules, footer, trailing guard) costs 12
+	// lines. Headers, indicators and the narrow-mode badge block all add
+	// rendered lines beyond the row count, so fit by measuring the actual
+	// output: shrink the row window until the block fits the terminal.
+	avail := 0
+	if m.height > 0 {
+		avail = m.height - 12
+		if avail < 8 {
+			avail = 8
+		}
+	}
+
+	try := func(narrow bool) string {
+		out := m.renderMenuWindow(width, allRows, fullCursor, 0, narrow)
+		if avail > 0 && strings.Count(out, "\n") > avail {
+			for budget := min(len(allRows), avail); budget >= 4; budget-- {
+				out = m.renderMenuWindow(width, allRows, fullCursor, budget, narrow)
+				if strings.Count(out, "\n") <= avail {
+					break
+				}
+			}
+		}
+		return out
+	}
+
+	out := try(false)
+	// The detail card has a fixed floor no row budget can get under, so a
+	// wide-but-short terminal (120x24 is common) cannot seat the two-pane
+	// layout at all. Fall back to the single-pane list, which the budget
+	// loop CAN always shrink to fit.
+	if avail > 0 && strings.Count(out, "\n") > avail {
+		out = try(true)
+	}
+	return out
+}
+
+// renderMenuWindow draws the menu over a row window. budget <= 0 renders
+// everything; narrow forces the single-pane layout regardless of width.
+func (m model) renderMenuWindow(width int, allRows []menuRow, fullCursor, budget int, narrow bool) string {
+	rows, cursor, above, below := windowMenuRows(allRows, fullCursor, budget)
 
 	var list strings.Builder
 
@@ -282,7 +327,12 @@ func (m model) renderMenu(width int) string {
 	}
 
 	if len(rows) == 0 {
-		list.WriteString(subtitleStyle.Render("  Nothing matches. Esc clears the filter."))
+		list.WriteString(mutedStyle.Render("  Nothing matches. Esc clears the filter."))
+		list.WriteString("\n")
+	}
+
+	if above > 0 {
+		list.WriteString(mutedStyle.Render(fmt.Sprintf(" ▲ %s above", pluralise(above, "row", "rows"))))
 		list.WriteString("\n")
 	}
 
@@ -297,7 +347,7 @@ func (m model) renderMenu(width int) string {
 				style = errorStyle
 			}
 			list.WriteString(style.Render(" " + header))
-			list.WriteString(" " + subtitleStyle.Render(strings.Repeat("─", max(2, menuListWidth-len(header)-3))))
+			list.WriteString(" " + mutedStyle.Render(strings.Repeat("─", max(2, menuListWidth-len(header)-3))))
 			list.WriteString("\n")
 			continue
 		}
@@ -315,7 +365,12 @@ func (m model) renderMenu(width int) string {
 		list.WriteString("\n")
 	}
 
-	if width < twoPaneMinWidth {
+	if below > 0 {
+		list.WriteString(mutedStyle.Render(fmt.Sprintf(" ▼ %s below", pluralise(below, "row", "rows"))))
+		list.WriteString("\n")
+	}
+
+	if narrow || width < twoPaneMinWidth {
 		// Narrow terminal: grouped list plus the one-line description.
 		var b strings.Builder
 		b.WriteString(list.String())
@@ -323,7 +378,7 @@ func (m model) renderMenu(width int) string {
 			b.WriteString("\n")
 			b.WriteString(safetyBadge(item.safety))
 			b.WriteString("\n")
-			b.WriteString(subtitleStyle.Render(item.description))
+			b.WriteString(mutedStyle.Render(item.description))
 			b.WriteString("\n")
 		}
 		return lipgloss.PlaceHorizontal(width, lipgloss.Center,
@@ -359,6 +414,9 @@ func (m model) menuHotkeys() string {
 	if m.menuFiltering {
 		return "type to filter • ↑/↓ move • enter select • esc clear"
 	}
+	if m.menuFilter != "" {
+		return "↑/k up • ↓/j down • enter select • esc clear filter • ? help • q quit"
+	}
 	return "↑/k up • ↓/j down • enter select • / filter • ? help • q quit"
 }
 
@@ -374,4 +432,31 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// pluralise renders a count with the right noun form. "1 snapshot(s)" is a
+// construction no reader should meet and no locale can translate.
+func pluralise(n int, singular, plural string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, singular)
+	}
+	return fmt.Sprintf("%d %s", n, plural)
+}
+
+// windowMenuRows returns the slice of rows that fits the vertical budget,
+// keeping the cursor visible with context, plus how many rows were cut above
+// and below. budget <= 0 means unlimited.
+func windowMenuRows(rows []menuRow, cursor, budget int) ([]menuRow, int, int, int) {
+	if budget <= 0 || len(rows) <= budget {
+		return rows, cursor, 0, 0
+	}
+	start := cursor - budget/2
+	if start < 0 {
+		start = 0
+	}
+	if start+budget > len(rows) {
+		start = len(rows) - budget
+	}
+	end := start + budget
+	return rows[start:end], cursor - start, start, len(rows) - end
 }

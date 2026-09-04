@@ -4,6 +4,8 @@
 package main
 
 import (
+	tea "github.com/charmbracelet/bubbletea"
+
 	"strings"
 	"testing"
 )
@@ -170,4 +172,69 @@ func lipglossWidth(line string) int {
 		}
 	}
 	return visible
+}
+
+// The review found the composed View overflowing the terminal - first at
+// 80x24, then (after the first fix) on wide-but-short terminals where the
+// two-pane detail card could not shrink. Sweep the common geometries, with
+// the cursor at several depths so the danger zone and mid-list windows are
+// both exercised.
+func TestComposedViewFitsCommonTerminals(t *testing.T) {
+	rows := visibleMenuRows("")
+	cursors := []int{clampMenuCursor(rows, 1), len(rows) / 2, len(rows) - 1}
+
+	for _, w := range []int{80, 96, 120, 160} {
+		for _, h := range []int{24, 30, 40} {
+			for _, c := range cursors {
+				m := model{width: w, height: h, state: stateMenu,
+					menuIndex: clampMenuCursor(rows, c)}
+				view := m.View()
+				lines := strings.Split(view, "\n")
+				if len(lines) > h+1 {
+					t.Errorf("%dx%d cursor %d: View() emits %d lines", w, h, c, len(lines))
+				}
+				for i, line := range lines {
+					if vw := lipglossWidth(line); vw > w {
+						t.Errorf("%dx%d cursor %d: line %d overflows (%d cols)", w, h, c, i, vw)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestMenuWindowKeepsTheCursorVisible(t *testing.T) {
+	rows := visibleMenuRows("")
+	// Cursor on the last item, tiny budget.
+	last := clampMenuCursor(rows, len(rows)-1)
+	for last < len(rows)-1 {
+		next := moveMenuCursor(rows, last, 1)
+		if next == last {
+			break
+		}
+		last = next
+	}
+
+	windowed, cursor, above, below := windowMenuRows(rows, last, 8)
+
+	if len(windowed) != 8 {
+		t.Fatalf("window size = %d, want 8", len(windowed))
+	}
+	if windowed[cursor].item == nil || windowed[cursor].item.title != rows[last].item.title {
+		t.Error("the cursor row must survive windowing")
+	}
+	if below != 0 || above != len(rows)-8 {
+		t.Errorf("cut counts wrong: above=%d below=%d", above, below)
+	}
+}
+
+func TestMenuEscClearsACommittedFilter(t *testing.T) {
+	m := model{state: stateMenu, width: 80, height: 24, menuFilter: "backup"}
+
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = m2.(model)
+
+	if m.menuFilter != "" {
+		t.Errorf("esc should clear the committed filter, got %q", m.menuFilter)
+	}
 }

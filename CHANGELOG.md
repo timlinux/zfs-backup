@@ -28,6 +28,24 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Every screen now seats on a standard terminal.** A three-round UX review
+  (80-200 columns x 16-50 rows, 6,300 rendered geometries) drove out every
+  overflow at height >= 23: the menu windows itself with scroll indicators
+  and falls back from the two-pane layout when the terminal cannot seat the
+  detail card; the cleanup confirmation shows exactly the snapshots that
+  will die while DESTROY is typed; the disk-wipe banner is a flat one-line
+  banner that can never scroll off; help scrolls in a viewport. Typed
+  confirmations never pre-fill their own answer, `q` is an ordinary
+  character in text fields, esc steps back one stage through the prepare
+  wizard, and ctrl+c is trapped only while something genuinely
+  uninterruptible runs.
+- **The palette is aligned to the Kartoza brand tokens** and every colour
+  clears WCAG AA on the dark background: amber #EEB348, blue #54A2CC, grey
+  #8A8B8B, with success and error as dark-legible tints of the brand status
+  tokens. Safety badges map read-only/makes-changes/destructive onto
+  success/warn/error, and the footer credit reads
+  "Made with ♥ by [K]artoza | D[o]nate! | [G]itHub" with the link keys
+  readable without colour.
 - **The main menu was redesigned.** Operations are grouped into named
   sections (Back Up, Restore, Health, Pools, Danger Zone) in workflow order.
   Every entry carries a safety badge - read-only, makes changes, or

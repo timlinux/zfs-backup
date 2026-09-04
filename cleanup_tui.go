@@ -92,18 +92,19 @@ func performCleanup(pool string, targets []string) tea.Cmd {
 
 // updateCleanupScreen handles keys for the cleanup screen.
 func (m model) updateCleanupScreen(msg tea.KeyMsg) (model, tea.Cmd) {
+	// Destroying is not interruptible - a half-cancelled destroy loop is
+	// harder to reason about than letting it finish - and that includes
+	// ctrl+c, or the promise would be one keystroke deep.
+	if m.cleanupPhase == cleanupPhaseRunning {
+		return m, nil
+	}
 	if msg.String() == "ctrl+c" {
 		m.quitting = true
 		return m, tea.Quit
 	}
 
-	switch m.cleanupPhase {
-	case cleanupPhaseConfirm:
+	if m.cleanupPhase == cleanupPhaseConfirm {
 		return m.updateCleanupConfirm(msg)
-	case cleanupPhaseRunning:
-		// Destroying is not interruptible - a half-cancelled destroy loop is
-		// harder to reason about than simply letting it finish.
-		return m, nil
 	}
 
 	switch msg.String() {
@@ -127,8 +128,12 @@ func (m model) updateCleanupScreen(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 		m.cleanupPhase = cleanupPhaseConfirm
 		m.cleanupMessage = ""
+		// The confirm furniture (banner, prompt, input) costs ~8 rows below
+		// the viewport, and what must be visible while DESTROY is typed is
+		// the list of what dies - so swap in a compact body sized to fit.
+		m.cleanupViewport = newShorterViewport(m.width, m.height, 4, confirmCleanupBody(m.cleanupPlan))
 		m.input.SetValue("")
-		m.input.Placeholder = destroyConfirmationWord
+		m.input.Placeholder = ""
 		m.input.Focus()
 		return m, textinput.Blink
 	default:
@@ -141,9 +146,16 @@ func (m model) updateCleanupScreen(msg tea.KeyMsg) (model, tea.Cmd) {
 // updateCleanupConfirm handles the typed-confirmation phase.
 func (m model) updateCleanupConfirm(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
+	case "up", "down", "pgup", "pgdown":
+		// The list of what dies must stay reachable at the moment of
+		// commitment - navigation scrolls the plan, it never types.
+		var cmd tea.Cmd
+		m.cleanupViewport, cmd = m.cleanupViewport.Update(msg)
+		return m, cmd
 	case "esc":
 		m.cleanupPhase = cleanupPhasePlan
 		m.cleanupMessage = "Aborted. Nothing was destroyed."
+		m.cleanupViewport = newReportViewport(m.width, m.height, m.cleanupPlanBody)
 		m.input.SetValue("")
 		m.input.Blur()
 		return m, nil
@@ -194,12 +206,16 @@ func (m model) renderCleanupContent(width int) string {
 	case cleanupPhasePlan:
 		b.WriteString(centre.Render(m.renderCleanupPlanFooter()))
 	case cleanupPhaseConfirm:
-		b.WriteString(centre.Render(destructiveWarningStyle.Render(
-			"  DESTROYING SNAPSHOTS IS IRREVERSIBLE  ")))
+		if !m.cleanupViewport.AtBottom() {
+			b.WriteString(centre.Render(mutedStyle.Render(fmt.Sprintf(
+				"▼ more below | %d%%", int(m.cleanupViewport.ScrollPercent()*100)))))
+			b.WriteString("\n")
+		}
+		b.WriteString(centre.Render(dangerBanner("DESTROYING SNAPSHOTS IS IRREVERSIBLE")))
 		b.WriteString("\n")
 		b.WriteString(centre.Render(warningStyle.Render(fmt.Sprintf(
-			"Type %s to destroy %d snapshot(s) on %s",
-			destroyConfirmationWord, len(m.cleanupPlan.Targets), m.cleanupPool))))
+			"Type %s to destroy %s on %s",
+			destroyConfirmationWord, pluralise(len(m.cleanupPlan.Targets), "snapshot", "snapshots"), m.cleanupPool))))
 		b.WriteString("\n")
 		b.WriteString(centre.Render(m.input.View()))
 	case cleanupPhaseRunning:
@@ -222,9 +238,9 @@ func (m model) renderCleanupPlanFooter() string {
 	if m.cleanupPlan == nil || len(m.cleanupPlan.Targets) == 0 {
 		return statusStyle.Render("Nothing to clean up - this pool is healthy.")
 	}
-	return warningStyle.Render(fmt.Sprintf(
-		"Dry run: %d snapshot(s), at least %s would be freed. Press d to destroy them.",
-		len(m.cleanupPlan.Targets), formatSize(m.cleanupPlan.uniqueBytes())))
+	return infoStyle.Render(fmt.Sprintf(
+		"Dry run: %s, at least %s would be freed. Press d to destroy them.",
+		pluralise(len(m.cleanupPlan.Targets), "snapshot", "snapshots"), formatSize(m.cleanupPlan.uniqueBytes())))
 }
 
 // renderCleanupDoneFooter summarises what the destroy run achieved.
@@ -232,10 +248,10 @@ func (m model) renderCleanupDoneFooter() string {
 	destroyed := len(m.cleanupOutcome.Destroyed)
 	if len(m.cleanupOutcome.Failures) > 0 {
 		return errorStyle.Render(fmt.Sprintf(
-			"Destroyed %d snapshot(s), %d failed - see the report above.",
-			destroyed, len(m.cleanupOutcome.Failures)))
+			"Destroyed %s, %d failed - see the report above, then press r to re-scan.",
+			pluralise(destroyed, "snapshot", "snapshots"), len(m.cleanupOutcome.Failures)))
 	}
-	return statusStyle.Render(fmt.Sprintf("Destroyed %d snapshot(s).", destroyed))
+	return statusStyle.Render(fmt.Sprintf("Destroyed %s.", pluralise(destroyed, "snapshot", "snapshots")))
 }
 
 // buildCleanupPlanView renders the dry-run body shown in the viewport.
@@ -318,7 +334,7 @@ func buildCleanupResultView(pool string, outcome cleanupOutcome, usage []dataset
 func (m model) cleanupHotkeys() string {
 	switch m.cleanupPhase {
 	case cleanupPhaseConfirm:
-		return fmt.Sprintf("type %s • enter confirm • esc cancel", destroyConfirmationWord)
+		return fmt.Sprintf("scroll ↑/↓ • type %s • enter confirm • esc back", destroyConfirmationWord)
 	case cleanupPhaseRunning:
 		return "destroying - please wait"
 	case cleanupPhaseDone:
@@ -329,4 +345,24 @@ func (m model) cleanupHotkeys() string {
 		}
 		return "scroll up/down • r refresh • esc return"
 	}
+}
+
+// confirmCleanupBody is what the viewport shows while DESTROY is typed: the
+// exact list of what dies, nothing else. The scope advisory and dry-run
+// detail belong to the plan phase; at the moment of commitment the names are
+// the only thing that matters.
+func confirmCleanupBody(plan *cleanupPlan) string {
+	var b strings.Builder
+	b.WriteString(labelStyle.Render(fmt.Sprintf(
+		"These %s will be destroyed on %s:",
+		pluralise(len(plan.Targets), "snapshot", "snapshots"), plan.Scan.Pool)))
+	b.WriteString("\n\n")
+	for _, name := range plan.Targets {
+		b.WriteString("  " + name + "\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(infoStyle.Render(fmt.Sprintf(
+		"At least %s is freed once they are gone.", formatSize(plan.uniqueBytes()))))
+	b.WriteString("\n")
+	return b.String()
 }

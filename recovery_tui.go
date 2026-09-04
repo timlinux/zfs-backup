@@ -68,15 +68,19 @@ func runRemedy(pool string, remedy poolRemedy) tea.Cmd {
 
 // updateRecoverPoolScreen handles keys for the guided recovery screen.
 func (m model) updateRecoverPoolScreen(msg tea.KeyMsg) (model, tea.Cmd) {
-	if msg.String() == "ctrl+c" {
+	// A half-cancelled zpool command leaves a worse mess than waiting, so
+	// ctrl+c is trapped while a REMEDY runs - but the initial health check
+	// is read-only and can take 45s on a wedged pool, and pinning the user
+	// to an unresponsive screen for that would be its own defect.
+	if msg.String() == "ctrl+c" && m.recoverPhase != recoverPhaseWorking {
 		m.quitting = true
 		return m, tea.Quit
 	}
+	if m.recoverPhase == recoverPhaseWorking || m.recoverPhase == recoverPhaseChecking {
+		return m, nil
+	}
 
 	switch m.recoverPhase {
-	case recoverPhaseWorking, recoverPhaseChecking:
-		// A half-cancelled zpool command leaves a worse mess than waiting.
-		return m, nil
 
 	case recoverPhaseConfirm:
 		switch msg.String() {
@@ -240,7 +244,7 @@ func (m model) renderRecoverPoolContent(width int) string {
 		b.WriteString(centre.Render(warningStyle.Render(
 			"zfs-backup cannot take this further - see the notes above.")))
 	default:
-		b.WriteString(centre.Render(warningStyle.Render("Press enter to run the next step.")))
+		b.WriteString(centre.Render(infoStyle.Render("Press enter to run the next step.")))
 	}
 	b.WriteString("\n")
 

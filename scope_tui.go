@@ -295,3 +295,26 @@ func newReportViewport(width, height int, content string) viewport.Model {
 		Padding(0, 1)
 	return vp
 }
+
+// newShorterViewport builds a viewport like newReportViewport but reserves
+// extra rows for furniture below it, and never taller than its content.
+func newShorterViewport(width, height, reserve int, content string) viewport.Model {
+	viewportHeight := height - 14 - reserve
+	if lines := strings.Count(content, "\n") + 1; viewportHeight > lines {
+		viewportHeight = lines
+	}
+	if viewportHeight < 3 {
+		viewportHeight = 3
+	}
+	viewportWidth := width - 8
+	if viewportWidth < 40 {
+		viewportWidth = 40
+	}
+	vp := viewport.New(viewportWidth, viewportHeight)
+	vp.SetContent(content)
+	vp.Style = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorAlert).
+		Padding(0, 1)
+	return vp
+}

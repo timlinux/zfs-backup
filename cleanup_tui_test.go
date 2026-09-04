@@ -441,3 +441,85 @@ func TestCleanupPlanViewIsQuietOnceAScopeIsChosen(t *testing.T) {
 		t.Errorf("a configured pool must not be nagged:\n%s", view)
 	}
 }
+
+// Blocker from review: while the DESTROY confirmation is open, the list of
+// what dies must remain scrollable - arrow keys navigate, they do not type.
+func TestCleanupConfirmKeepsThePlanScrollable(t *testing.T) {
+	m := cleanupModel()
+	m, _ = m.updateCleanupScreen(keyRunes("d"))
+
+	m, _ = m.updateCleanupScreen(tea.KeyMsg{Type: tea.KeyDown})
+
+	if m.input.Value() != "" {
+		t.Errorf("arrow keys must scroll, not type; input now %q", m.input.Value())
+	}
+	if m.cleanupPhase != cleanupPhaseConfirm {
+		t.Error("scrolling must not leave the confirmation")
+	}
+}
+
+// The uninterruptible phase includes ctrl+c - the comment promised it.
+func TestCleanupCtrlCIsIgnoredWhileDestroying(t *testing.T) {
+	m := cleanupModel()
+	m.cleanupPhase = cleanupPhaseRunning
+
+	next, cmd := m.updateCleanupScreen(tea.KeyMsg{Type: tea.KeyCtrlC})
+
+	if next.quitting || cmd != nil {
+		t.Error("ctrl+c must not interrupt a destroy in progress")
+	}
+}
+
+// The confirm phase must fit the terminal AND show the destruction list -
+// not the scope advisory - while DESTROY is typed.
+func TestCleanupConfirmFitsAndShowsWhatDies(t *testing.T) {
+	m := cleanupModel()
+	m.width, m.height, m.state = 80, 24, stateCleanup
+	m, _ = m.updateCleanupScreen(keyRunes("d"))
+
+	view := m.View()
+	lines := strings.Split(view, "\n")
+
+	if len(lines) > 25 {
+		t.Errorf("confirm phase emits %d lines on a 24-row terminal", len(lines))
+	}
+	if !strings.Contains(view, "NIXROOT/root@2026-08-13.23h-47-Backup") {
+		t.Errorf("the first target must be visible at the moment of commitment:\n%s", view)
+	}
+	if !strings.Contains(view, "DESTROYING SNAPSHOTS IS IRREVERSIBLE") {
+		t.Error("the banner must be visible")
+	}
+}
+
+// Backing out of the confirmation restores the full dry-run body.
+func TestCleanupEscFromConfirmRestoresThePlan(t *testing.T) {
+	m := cleanupModel()
+	m.width, m.height = 80, 30
+	m.cleanupPlanBody = "FULL PLAN BODY SENTINEL"
+	m, _ = m.updateCleanupScreen(keyRunes("d"))
+	m, _ = m.updateCleanupScreen(tea.KeyMsg{Type: tea.KeyEsc})
+
+	if !strings.Contains(m.cleanupViewport.View(), "FULL PLAN BODY SENTINEL") {
+		t.Error("esc should restore the dry-run body in the viewport")
+	}
+}
+
+// With more targets than the viewport seats, the confirm phase must say more
+// exists - hundreds of orphans is the normal post-1.x case.
+func TestCleanupConfirmAdvertisesScrollWhenTheListIsLong(t *testing.T) {
+	m := cleanupModel()
+	m.width, m.height = 80, 24
+	for i := 0; i < 40; i++ {
+		m.cleanupPlan.Targets = append(m.cleanupPlan.Targets,
+			fmt.Sprintf("NIXROOT/root@2026-01-%02d.00h-00-Backup", i+1))
+	}
+	m, _ = m.updateCleanupScreen(keyRunes("d"))
+
+	out := m.renderCleanupContent(80)
+	if !strings.Contains(out, "▼ more below") {
+		t.Errorf("a cut list must say more exists:\n%s", out)
+	}
+	if !strings.Contains(m.cleanupHotkeys(), "scroll") {
+		t.Errorf("the confirm hotkeys must mention scrolling: %q", m.cleanupHotkeys())
+	}
+}

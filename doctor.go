@@ -563,7 +563,7 @@ func destroyPlannedSnapshots(ctx context.Context, r commandRunner, targets []str
 	var outcome cleanupOutcome
 	for _, name := range targets {
 		if err := r.Run(ctx, "zfs", "destroy", name); err != nil {
-			outcome.Failures = append(outcome.Failures, fmt.Sprintf("%s: %v", name, err))
+			outcome.Failures = append(outcome.Failures, fmt.Sprintf("%s: %s", name, explainDestroyFailure(err)))
 			continue
 		}
 		outcome.Destroyed = append(outcome.Destroyed, name)
@@ -693,4 +693,17 @@ func unsetScopeNotice(scan *orphanScan) string {
 			"      (Backup Scope in the menu), then run this again - everything you\n"+
 			"      leave out becomes cleanable.\n",
 		scan.Pool, len(scan.InScope))
+}
+
+// explainDestroyFailure attaches a remedy to the ZFS failures users actually
+// hit, instead of leaving them alone with an internal string.
+func explainDestroyFailure(err error) string {
+	text := err.Error()
+	if strings.Contains(text, "dataset is busy") {
+		return text + " (something is still using this snapshot - a clone or an open mount; unmount it and press r to try again)"
+	}
+	if strings.Contains(text, "snapshot has dependent clones") {
+		return text + " (a clone was created from this snapshot; it cannot go until the clone does)"
+	}
+	return text
 }

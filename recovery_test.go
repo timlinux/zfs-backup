@@ -281,3 +281,21 @@ func TestRecoveryRecordsATimeoutAsAFinding(t *testing.T) {
 		t.Errorf("a timeout should be explained:\n%s", m.recoverBody())
 	}
 }
+
+// ctrl+c must work during the read-only health probe (it can take 45s on a
+// wedged pool), while remaining trapped during an actual remedy.
+func TestRecoveryCtrlCAllowedDuringProbeTrappedDuringRemedy(t *testing.T) {
+	probe := recoverModel()
+	probe.recoverPhase = recoverPhaseChecking
+	next, _ := probe.updateRecoverPoolScreen(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if !next.quitting {
+		t.Error("ctrl+c must exit the read-only probe")
+	}
+
+	working := recoverModel()
+	working.recoverPhase = recoverPhaseWorking
+	next, cmd := working.updateRecoverPoolScreen(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if next.quitting || cmd != nil {
+		t.Error("ctrl+c must not interrupt a running remedy")
+	}
+}
