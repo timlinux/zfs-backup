@@ -42,10 +42,10 @@ const (
 	appTagline = "Keep your ZFS Backed Up!"
 
 	// URLs for footer links
-	kartozaURL  = "https://kartoza.com"
-	donateURL   = "https://github.com/sponsors/kartoza"
-	githubURL   = "https://github.com/kartoza/zfs-backup"
-	docsURL     = "https://kartoza.github.io/zfs-backup"
+	kartozaURL = "https://kartoza.com"
+	donateURL  = "https://github.com/sponsors/kartoza"
+	githubURL  = "https://github.com/kartoza/zfs-backup"
+	docsURL    = "https://kartoza.github.io/zfs-backup"
 )
 
 // Kartoza brand colors
@@ -169,9 +169,9 @@ var (
 				Bold(true)
 
 	poolSelectorActiveStyle = lipgloss.NewStyle().
-					Foreground(colorHighlight1).
-					Bold(true).
-					Padding(0, 1)
+				Foreground(colorHighlight1).
+				Bold(true).
+				Padding(0, 1)
 
 	labelStyle = lipgloss.NewStyle().
 			Foreground(colorHighlight3).
@@ -364,6 +364,8 @@ func (m model) getStatusText() string {
 		return "Backup Health"
 	case stateCleanup:
 		return "Cleanup"
+	case stateRecoverPool:
+		return "Pool Recovery"
 	case stateMaintenance:
 		return "Pool Maintenance"
 	case stateQuotaManage:
@@ -409,6 +411,8 @@ func (m model) getHotkeys() string {
 		return "scroll up/down • c clean up • r refresh • esc return"
 	case stateCleanup:
 		return m.cleanupHotkeys()
+	case stateRecoverPool:
+		return m.recoverHotkeys()
 	case stateMaintenance:
 		return "s start scrub • x stop scrub • r refresh • esc return"
 	case stateQuotaManage:
@@ -461,6 +465,7 @@ var mainMenuItems = []menuItem{
 	{title: "Restore Files", description: "Browse snapshots and restore files to any location", icon: ""},
 	{title: "Show zpool info", description: "Show detailed information about ZFS pool structure, status and health", icon: ""},
 	{title: "Pool Maintenance", description: "Start, stop, or monitor scrub operations for data integrity verification", icon: ""},
+	{title: "Fix a Pool That Stopped Responding", description: "Diagnose and recover a pool ZFS has suspended - usually a disconnected backup drive", icon: ""},
 	{title: "Manage Datasets", description: "View/edit quotas, create and delete ZFS datasets", icon: ""},
 	{title: "Backup Scope", description: "Choose which datasets are backed up - anything else is never touched", icon: ""},
 	{title: "Backup Health Check", description: "Find orphaned snapshots and datasets whose quota is filling with snapshots", icon: ""},
@@ -476,109 +481,119 @@ var mainMenuItems = []menuItem{
 }
 
 type model struct {
-	state            sessionState
-	menuIndex        int // Current menu selection index
-	spinner          spinner.Model
-	input            textinput.Model
-	passwordInput    textinput.Model
-	progress         progress.Model
-	operation        string
-	message          string
-	err              error
-	width            int
-	height           int
-	confirmMsg       string
-	confirmYes       bool
-	quitting         bool
-	showingHelp      bool
-	password         string
-	devicePath       string
-	backupState      *BackupState
-	currentStage     string
-	cancelFunc       context.CancelFunc
-	resumeState      *BackupState
-	totalStages      int
-	eta              time.Duration
+	state         sessionState
+	menuIndex     int // Current menu selection index
+	spinner       spinner.Model
+	input         textinput.Model
+	passwordInput textinput.Model
+	progress      progress.Model
+	operation     string
+	message       string
+	err           error
+	width         int
+	height        int
+	confirmMsg    string
+	confirmYes    bool
+	quitting      bool
+	showingHelp   bool
+	password      string
+	devicePath    string
+	backupState   *BackupState
+	currentStage  string
+	cancelFunc    context.CancelFunc
+	resumeState   *BackupState
+	totalStages   int
+	eta           time.Duration
 	// Pool selection (shown after backup option selected)
-	availablePools   []string
-	sourcePool       string
-	destPool         string
-	selectingPool    bool      // Are we in pool selection mode?
-	poolSelectIndex  int       // Current pool selection index
-	selectingSource  bool      // true = selecting source, false = selecting dest
+	availablePools  []string
+	sourcePool      string
+	destPool        string
+	selectingPool   bool // Are we in pool selection mode?
+	poolSelectIndex int  // Current pool selection index
+	selectingSource bool // true = selecting source, false = selecting dest
 	// Progress channel for real-time updates
-	progressChan       chan progressUpdate
+	progressChan chan progressUpdate
 	// Per-dataset sync progress (populated during sync stage)
 	datasetProgress    []DatasetProgress
-	currentDataset     int // Index of currently syncing dataset (-1 if none)
+	currentDataset     int       // Index of currently syncing dataset (-1 if none)
 	operationStartTime time.Time // When the current operation started
 	// Restore mode
-	restoreModel     RestoreModel
+	restoreModel RestoreModel
 	// Zpool info viewer
-	zpoolInfoPool    string           // Selected pool for info display
-	zpoolViewport    viewport.Model   // Scrollable viewport for info
-	zpoolInfoReady   bool             // Is the viewport content ready?
+	zpoolInfoPool  string         // Selected pool for info display
+	zpoolViewport  viewport.Model // Scrollable viewport for info
+	zpoolInfoReady bool           // Is the viewport content ready?
 	// Backup scope editor - which datasets this pool actually backs up
-	scopePool        string          // Pool whose scope is being edited
-	scopeDatasets    []string        // Every direct child of the pool
-	scopeSelected    map[string]bool // Datasets currently in scope
-	scopeMissing     []string        // Configured datasets that no longer exist
-	scopeIndex       int             // Cursor position in the dataset list
-	scopeMessage     string          // Inline validation / confirmation message
+	scopePool     string          // Pool whose scope is being edited
+	scopeDatasets []string        // Every direct child of the pool
+	scopeSelected map[string]bool // Datasets currently in scope
+	scopeMissing  []string        // Configured datasets that no longer exist
+	scopeIndex    int             // Cursor position in the dataset list
+	scopeMessage  string          // Inline validation / confirmation message
 	// Health check
-	doctorPool       string         // Pool being checked
-	doctorViewport   viewport.Model // Scrollable viewport for the report
-	doctorReady      bool           // Is the report ready?
-	doctorProblems   int            // Number of issue groups found
+	doctorPool     string         // Pool being checked
+	doctorViewport viewport.Model // Scrollable viewport for the report
+	doctorReady    bool           // Is the report ready?
+	doctorProblems int            // Number of issue groups found
 	// Orphan cleanup
-	cleanupPool      string         // Pool being cleaned
-	cleanupPlan      *cleanupPlan   // Vetted dry run - what would be destroyed
-	cleanupViewport  viewport.Model // Scrollable plan / result body
-	cleanupReady     bool           // Is the plan ready?
-	cleanupPhase     cleanupPhase   // Plan, confirm, running or done
-	cleanupOutcome   cleanupOutcome // What the destroy run actually did
-	cleanupMessage   string         // Inline validation / abort message
+	cleanupPool     string         // Pool being cleaned
+	cleanupPlan     *cleanupPlan   // Vetted dry run - what would be destroyed
+	cleanupViewport viewport.Model // Scrollable plan / result body
+	cleanupReady    bool           // Is the plan ready?
+	cleanupPhase    cleanupPhase   // Plan, confirm, running or done
+	cleanupOutcome  cleanupOutcome // What the destroy run actually did
+	cleanupMessage  string         // Inline validation / abort message
+	// Guided pool recovery
+	recoverPool     string         // Pool being recovered
+	recoverHealth   poolHealth     // Latest diagnosis
+	recoverRemedies []poolRemedy   // The escalation ladder
+	recoverIndex    int            // Next remedy to offer
+	recoverPhase    recoverPhase   // Where the user is in the flow
+	recoverLog      []string       // What has been tried, in order
+	recoverViewport viewport.Model // Scrollable diagnosis and log
+	recoverReady    bool           // Is the first check done?
+	recoverMessage  string         // Inline note
 	// Maintenance
-	maintenancePool    string         // Selected pool for maintenance
-	maintenanceAction  string         // Current maintenance action
-	scrubProgress      string         // Current scrub progress info
-	maintenanceReady   bool           // Is maintenance info ready?
+	maintenancePool   string // Selected pool for maintenance
+	maintenanceAction string // Current maintenance action
+	scrubProgress     string // Current scrub progress info
+	maintenanceReady  bool   // Is maintenance info ready?
 	// Result viewport
-	resultViewport     viewport.Model // Scrollable viewport for result content
-	resultReady        bool           // Is result viewport ready?
+	resultViewport viewport.Model // Scrollable viewport for result content
+	resultReady    bool           // Is result viewport ready?
 	// Prepare operation phases
-	preparePhase       int            // 0 = device path input, 1 = pool name input
+	preparePhase int // 0 = device path input, 1 = pool name input
 	// Remote backup
-	remoteHost         string         // SSH host for remote backup (user@host)
-	remoteDataset      string         // Remote dataset path (e.g., NIXROOT/home)
-	remoteInputPhase   int            // 0 = host input, 1 = dataset input
-	isRemote           bool           // Whether current operation is remote
+	remoteHost       string // SSH host for remote backup (user@host)
+	remoteDataset    string // Remote dataset path (e.g., NIXROOT/home)
+	remoteInputPhase int    // 0 = host input, 1 = dataset input
+	isRemote         bool   // Whether current operation is remote
 	// Saved remote hosts
-	savedHosts         []RemoteHost   // Loaded from config
-	savedHostIndex     int            // Selection cursor in saved host list
-	selectingSavedHost bool           // Are we showing the saved host picker?
+	savedHosts         []RemoteHost // Loaded from config
+	savedHostIndex     int          // Selection cursor in saved host list
+	selectingSavedHost bool         // Are we showing the saved host picker?
 	// Quota/Dataset management
-	quotaDatasets      []quotaEntry   // Datasets with quota info
-	quotaIndex         int            // Current row cursor
-	quotaEditing       bool           // Are we editing a quota value?
-	quotaInput         textinput.Model // Input for editing quota
-	quotaPool          string         // Pool being managed
-	quotaPoolSize      string         // Total pool size
-	quotaPoolFree      string         // Free space on pool
+	quotaDatasets []quotaEntry    // Datasets with quota info
+	quotaIndex    int             // Current row cursor
+	quotaEditing  bool            // Are we editing a quota value?
+	quotaInput    textinput.Model // Input for editing quota
+	quotaPool     string          // Pool being managed
+	quotaPoolSize string          // Total pool size
+	quotaPoolFree string          // Free space on pool
 	// Dataset creation form
-	datasetCreating    bool           // Are we in the create dataset form?
-	datasetFormField   int            // Current field in create form
-	datasetForm        datasetCreateForm // Form data
+	datasetCreating  bool              // Are we in the create dataset form?
+	datasetFormField int               // Current field in create form
+	datasetForm      datasetCreateForm // Form data
 	// Dataset deletion
-	datasetDeleting    bool           // Are we confirming a delete?
+	datasetDeleting bool // Are we confirming a delete?
 	// Report browser
-	reportFiles        []reportEntry  // List of report files
-	reportIndex        int            // Selection cursor in report list
-	reportViewport     viewport.Model // Viewport for viewing a report
-	reportViewing      bool           // Are we viewing a report (vs listing)?
+	reportFiles    []reportEntry  // List of report files
+	reportIndex    int            // Selection cursor in report list
+	reportViewport viewport.Model // Viewport for viewing a report
+	reportViewing  bool           // Are we viewing a report (vs listing)?
 	// Last generated report (for opening from result screen)
-	lastReportMd       string         // Path to last generated markdown report
-	lastReportPdf      string         // Path to last generated PDF report
+	lastReportMd  string // Path to last generated markdown report
+	lastReportPdf string // Path to last generated PDF report
 }
 
 // =============================================================================
@@ -672,12 +687,12 @@ func loadReportContent(path string) tea.Cmd {
 }
 
 type quotaEntry struct {
-	Name        string // Dataset name (e.g., NIXROOT/home)
-	Type        string // "filesystem" or "volume"
-	Quota       string // Current quota (e.g., "3T", "none")
-	Used        string // Current usage
-	Available   string // Available space
-	SupportsQuota bool // Whether this dataset type supports quotas
+	Name          string // Dataset name (e.g., NIXROOT/home)
+	Type          string // "filesystem" or "volume"
+	Quota         string // Current quota (e.g., "3T", "none")
+	Used          string // Current usage
+	Available     string // Available space
+	SupportsQuota bool   // Whether this dataset type supports quotas
 }
 
 // datasetCreateForm holds the form state for creating a new dataset
@@ -1181,6 +1196,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return m, m.preparePoolAccess(selectedPool)
 						}
 
+						// Recovery is the one flow that must not try to import or
+						// unlock the pool first: it exists precisely for pools that
+						// cannot be accessed, and preparing access would fail.
+						if m.operation == "recover-pool" {
+							m.selectingPool = false
+							m = m.startPoolRecovery(selectedPool)
+							return m, tea.Batch(m.spinner.Tick, checkPool(selectedPool))
+						}
+
 						// Backup scope and the health check act on the source
 						// pool alone, so there is no destination to pick.
 						if m.operation == "scope" || m.operation == "doctor" || m.operation == "cleanup" {
@@ -1374,6 +1398,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.operation = "zpoolinfo"
 					m.startPoolSelection(false)
 					return m, nil
+				case "Fix a Pool That Stopped Responding":
+					m.operation = "recover-pool"
+					m.startPoolSelection(true)
+					return m, nil
 				case "Pool Maintenance":
 					m.operation = "maintenance"
 					m.startPoolSelection(false)
@@ -1564,6 +1592,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = stateMenu
 				m.resultReady = false
 				return m, nil
+			case "f", "F":
+				// The fix is offered where the failure is, so a wedged pool does
+				// not send the user back to the menu to hunt for the remedy.
+				if pool := recoverablePoolFromError(m.err); pool != "" {
+					m = m.startPoolRecovery(pool)
+					return m, tea.Batch(m.spinner.Tick, checkPool(pool))
+				}
+				return m, nil
 			case "p":
 				// Open report (PDF or markdown fallback)
 				if m.lastReportPdf != "" {
@@ -1589,6 +1625,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateDoctorScreen(msg)
 		} else if m.state == stateCleanup {
 			return m.updateCleanupScreen(msg)
+		} else if m.state == stateRecoverPool {
+			return m.updateRecoverPoolScreen(msg)
 		} else if m.state == stateZpoolInfo {
 			switch msg.String() {
 			case "esc", "q":
@@ -1979,6 +2017,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cleanupReady = true
 		return m, nil
 
+	case poolHealthMsg:
+		m.recoverHealth = msg.health
+		if m.recoverRemedies == nil {
+			m.recoverRemedies = poolRemedies(m.recoverPool)
+		}
+		if msg.health.Usable() {
+			m.recoverPhase = recoverPhaseRecovered
+		} else if m.recoverIndex >= len(m.recoverRemedies) {
+			m.recoverPhase = recoverPhaseExhausted
+		} else {
+			m.recoverPhase = recoverPhaseReady
+		}
+		m.recoverViewport = newReportViewport(m.width, m.height, m.recoverBody())
+		m.recoverReady = true
+		return m, nil
+
+	case remedyDoneMsg:
+		return m.afterRemedy(msg.result), nil
+
 	case cleanupDoneMsg:
 		m.cleanupOutcome = msg.outcome
 		m.cleanupPhase = cleanupPhaseDone
@@ -2310,6 +2367,8 @@ func (m model) renderContentNopad(width int) string {
 		content.WriteString(m.renderDoctorContent(width))
 	case stateCleanup:
 		content.WriteString(m.renderCleanupContent(width))
+	case stateRecoverPool:
+		content.WriteString(m.renderRecoverPoolContent(width))
 	case stateMaintenance:
 		content.WriteString(m.renderMaintenanceContent(width))
 	case stateQuotaManage:
@@ -3162,7 +3221,13 @@ func (m model) renderResultContent(width int) string {
 
 		b.WriteString(renderErrorDetail(m.err, width) + "\n\n")
 
-		hint := subtitleStyle.Render("Press enter/esc/q to return to menu")
+		hintText := "Press enter/esc/q to return to menu"
+		if recoverablePoolFromError(m.err) != "" {
+			b.WriteString(lipgloss.NewStyle().Width(width).Align(lipgloss.Center).
+				Render(statusStyle.Render("Press f to fix this now - zfs-backup will walk through the recovery")))
+			b.WriteString("\n\n")
+		}
+		hint := subtitleStyle.Render(hintText)
 		b.WriteString(lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(hint))
 	} else {
 		// Success display - scrollable viewport for long reports
@@ -3223,6 +3288,14 @@ OPERATIONS
 
   Pool Maintenance
      Start, stop, or monitor scrub operations for data integrity.
+
+  Fix a Pool That Stopped Responding
+     When ZFS suspends I/O to a pool - usually because a backup drive
+     was unplugged or a USB enclosure dropped off the bus - this
+     diagnoses it and works through the remedies for you, gentlest
+     first, re-checking the pool after each. Nothing here destroys
+     data, and the forceful step asks before it runs. The same screen
+     is offered with f when an operation fails for this reason.
 
   Manage Quotas
      View and edit dataset quotas. Units: T, G, M, K.
