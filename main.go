@@ -45,7 +45,7 @@ const (
 	kartozaURL = "https://kartoza.com"
 	donateURL  = "https://github.com/sponsors/kartoza"
 	githubURL  = "https://github.com/kartoza/zfs-backup"
-	docsURL    = "https://kartoza.github.io/zfs-backup"
+	docsURL    = "https://timlinux.github.io/zfs-backup"
 )
 
 // Kartoza brand colors
@@ -366,6 +366,10 @@ func (m model) getStatusText() string {
 		return "Cleanup"
 	case stateRecoverPool:
 		return "Pool Recovery"
+	case stateDevicePick:
+		return "Choose Disk"
+	case stateTypedConfirm:
+		return "Confirm"
 	case stateMaintenance:
 		return "Pool Maintenance"
 	case stateQuotaManage:
@@ -391,7 +395,7 @@ func (m model) getHotkeys() string {
 
 	switch m.state {
 	case stateMenu:
-		return "↑/k up • ↓/j down • enter select • ? help • q quit"
+		return m.menuHotkeys()
 	case stateConfirm:
 		return "y confirm • n cancel • esc back"
 	case stateInput, statePassword:
@@ -413,6 +417,10 @@ func (m model) getHotkeys() string {
 		return m.cleanupHotkeys()
 	case stateRecoverPool:
 		return m.recoverHotkeys()
+	case stateDevicePick:
+		return "↑/k up • ↓/j down • enter choose • r rescan • esc cancel"
+	case stateTypedConfirm:
+		return "type the word • enter confirm • esc cancel"
 	case stateMaintenance:
 		return "s start scrub • x stop scrub • r refresh • esc return"
 	case stateQuotaManage:
@@ -451,38 +459,11 @@ const (
 	stateReports
 )
 
-type menuItem struct {
-	title       string
-	description string
-	icon        string
-}
-
-// Simple menu items for main menu
-var mainMenuItems = []menuItem{
-	{title: "Backup ZFS (incremental)", description: "Run incremental backup from local source to destination pool using syncoid", icon: ""},
-	{title: "Pull Remote Backup", description: "Pull incremental backup from a remote host via SSH to local backup pool", icon: ""},
-	{title: "Push Backup to Remote", description: "Push local ZFS snapshots to a backup pool on a remote server via SSH", icon: ""},
-	{title: "Restore Files", description: "Browse snapshots and restore files to any location", icon: ""},
-	{title: "Show zpool info", description: "Show detailed information about ZFS pool structure, status and health", icon: ""},
-	{title: "Pool Maintenance", description: "Start, stop, or monitor scrub operations for data integrity verification", icon: ""},
-	{title: "Fix a Pool That Stopped Responding", description: "Diagnose and recover a pool ZFS has suspended - usually a disconnected backup drive", icon: ""},
-	{title: "Manage Datasets", description: "View/edit quotas, create and delete ZFS datasets", icon: ""},
-	{title: "Backup Scope", description: "Choose which datasets are backed up - anything else is never touched", icon: ""},
-	{title: "Backup Health Check", description: "Find orphaned snapshots and datasets whose quota is filling with snapshots", icon: ""},
-	{title: "Clean Up Orphaned Snapshots", description: "Reclaim space taken by snapshots older versions left behind - shows a dry run first", icon: ""},
-	{title: "Browse Reports", description: "View previous backup reports with timings, sizes, and error details", icon: ""},
-	{title: "Recover Failed Backup", description: "Fix broken sync state when backup was interrupted or snapshot was deleted", icon: ""},
-	{title: "Unmount Backup Disk", description: "Safely export the backup pool and power off the USB drive", icon: ""},
-	{title: "Help", description: "Show detailed help information about all operations", icon: ""},
-	{title: "Exit", description: "Exit the application", icon: ""},
-	{title: "---", description: "Danger Zone", icon: ""}, // Separator
-	{title: "Prepare Backup Device", description: "DESTRUCTIVE - Create an encrypted ZFS pool on a new external backup device", icon: ""},
-	{title: "Force Backup ZFS (destructive)", description: "DESTRUCTIVE - Deletes old snapshots on backup disk and forces full sync", icon: ""},
-}
-
 type model struct {
 	state         sessionState
-	menuIndex     int // Current menu selection index
+	menuIndex     int    // Cursor over the visible menu rows
+	menuFilter    string // Live type-ahead filter text
+	menuFiltering bool   // Is the filter input active?
 	spinner       spinner.Model
 	input         textinput.Model
 	passwordInput textinput.Model
@@ -553,6 +534,14 @@ type model struct {
 	recoverViewport viewport.Model // Scrollable diagnosis and log
 	recoverReady    bool           // Is the first check done?
 	recoverMessage  string         // Inline note
+	// Device picker and typed confirmation (destructive flows)
+	deviceCandidates   []deviceCandidate // Vetted disks for prepare
+	deviceIndex        int               // Cursor in the disk list
+	devicePickReady    bool              // Is the disk list loaded?
+	typedConfirmTitle  string            // Headline of the confirmation
+	typedConfirmDetail string            // What exactly will happen
+	typedConfirmWord   string            // What must be typed
+	typedConfirmError  string            // Rejection message
 	// Maintenance
 	maintenancePool   string // Selected pool for maintenance
 	maintenanceAction string // Current maintenance action
@@ -1254,6 +1243,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.cleanupPool = selectedPool
 						}
 
+						// Deleting backup history needs more than the y that got us
+						// here: now the target pool is known, name the cost and
+						// demand it typed.
+						if m.operation == "force-backup" {
+							m = m.startTypedConfirm(
+								"BACKUP HISTORY WILL BE DELETED",
+								forceBackupConfirmDetail(selectedPool),
+								destroyConfirmationWord)
+							return m, textinput.Blink
+						}
+
 						// Smart pool access: import if needed, skip password if already unlocked
 						return m, m.preparePoolAccess(selectedPool)
 					}
@@ -1284,37 +1284,61 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.state == stateMenu {
+			// Filter mode captures printable keys, so hotkeys like q and k
+			// type into the filter instead of acting.
+			if m.menuFiltering {
+				switch msg.String() {
+				case "ctrl+c":
+					m.quitting = true
+					return m, tea.Quit
+				case "esc":
+					m.menuFiltering = false
+					m.menuFilter = ""
+					return m, nil
+				case "backspace":
+					if m.menuFilter != "" {
+						m.menuFilter = m.menuFilter[:len(m.menuFilter)-1]
+					}
+					return m, nil
+				case "up", "down":
+					rows := visibleMenuRows(m.menuFilter)
+					delta := 1
+					if msg.String() == "up" {
+						delta = -1
+					}
+					m.menuIndex = moveMenuCursor(rows, clampMenuCursor(rows, m.menuIndex), delta)
+					return m, nil
+				case "enter":
+					// Falls through to the dispatch below with the filtered
+					// selection still in place.
+				default:
+					if msg.Type == tea.KeyRunes {
+						m.menuFilter += string(msg.Runes)
+						rows := visibleMenuRows(m.menuFilter)
+						m.menuIndex = clampMenuCursor(rows, m.menuIndex)
+					}
+					return m, nil
+				}
+			}
+
 			switch msg.String() {
 			case "ctrl+c", "q":
 				m.quitting = true
 				return m, tea.Quit
 
 			case "up", "k":
-				if m.menuIndex > 0 {
-					m.menuIndex--
-					// Skip separator
-					if mainMenuItems[m.menuIndex].title == "---" {
-						if m.menuIndex > 0 {
-							m.menuIndex--
-						} else {
-							m.menuIndex++
-						}
-					}
-				}
+				rows := visibleMenuRows(m.menuFilter)
+				m.menuIndex = moveMenuCursor(rows, clampMenuCursor(rows, m.menuIndex), -1)
 				return m, nil
 
 			case "down", "j":
-				if m.menuIndex < len(mainMenuItems)-1 {
-					m.menuIndex++
-					// Skip separator
-					if mainMenuItems[m.menuIndex].title == "---" {
-						if m.menuIndex < len(mainMenuItems)-1 {
-							m.menuIndex++
-						} else {
-							m.menuIndex--
-						}
-					}
-				}
+				rows := visibleMenuRows(m.menuFilter)
+				m.menuIndex = moveMenuCursor(rows, clampMenuCursor(rows, m.menuIndex), 1)
+				return m, nil
+
+			case "/":
+				m.menuFiltering = true
+				m.menuFilter = ""
 				return m, nil
 
 			case "?":
@@ -1335,14 +1359,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, openURL(githubURL)
 
 			case "enter":
-				selected := mainMenuItems[m.menuIndex]
+				selected, ok := m.currentMenuItem()
+				if !ok {
+					return m, nil
+				}
+				m.menuFiltering = false
 				switch selected.title {
-				case "Backup ZFS (incremental)":
+				case "Back Up Now":
 					m.operation = "backup"
 					m.isRemote = false
 					m.startPoolSelection(true)
 					return m, nil
-				case "Pull Remote Backup":
+				case "Pull Backup From Remote":
 					m.operation = "remote-backup"
 					m.isRemote = true
 					// Load saved hosts
@@ -1381,20 +1409,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.restoreModel.width = m.width
 					m.restoreModel.height = m.height
 					return m, nil
-				case "Force Backup ZFS (destructive)":
+				case "Force Full Backup":
 					m.state = stateConfirm
 					m.confirmMsg = "WARNING: This will delete all previous snapshots on the backup disk.\nAre you sure you want to continue?"
 					m.operation = "force-backup"
 					m.confirmYes = false
 					return m, nil
 				case "Prepare Backup Device":
-					m.state = stateInput
+					// The disk is chosen from a vetted picker, never typed from
+					// memory - the old free-text prompt suggested /dev/sda, which
+					// on many systems is the system disk.
 					m.operation = "prepare"
-					m.preparePhase = 0 // Start with device path input
-					m.input.Placeholder = "/dev/sda"
-					m.input.SetValue("")
-					return m, textinput.Blink
-				case "Show zpool info":
+					m.state = stateDevicePick
+					m.deviceIndex = 0
+					m.devicePickReady = false
+					return m, tea.Batch(m.spinner.Tick, loadDeviceCandidates())
+				case "Pool Information":
 					m.operation = "zpoolinfo"
 					m.startPoolSelection(false)
 					return m, nil
@@ -1422,7 +1452,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.operation = "doctor"
 					m.startPoolSelection(true)
 					return m, nil
-				case "Browse Reports":
+				case "Browse Backup Reports":
 					m.state = stateReports
 					m.reportViewing = false
 					m.reportIndex = 0
@@ -1435,12 +1465,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.operation = "unmount"
 					m.startPoolSelection(false)
 					return m, nil
-				case "Help":
-					m.showingHelp = true
-					return m, nil
-				case "Exit":
-					m.quitting = true
-					return m, tea.Quit
 				}
 			}
 		} else if m.state == stateConfirm {
@@ -1454,13 +1478,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.state = stateMenu
 					m.startPoolSelection(true)
 					return m, nil
-				} else if m.operation == "prepare" {
-					// For prepare, go to password state to collect encryption passphrase
-					m.state = statePassword
-					m.passwordInput.SetValue("")
-					m.passwordInput.Focus()
-					return m, textinput.Blink
 				}
+				// NOTE: prepare never passes through this y/n screen any more -
+				// it goes picker -> pool name -> typed disk-name confirmation.
 				return m.startOperation()
 			case "n", "N", "esc":
 				m.state = stateMenu
@@ -1505,18 +1525,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.input.SetValue("NIXBACKUPS") // Default to NIXBACKUPS
 						return m, nil
 					} else if m.operation == "prepare" && m.preparePhase == 1 {
-						// Phase 1: got pool name, go to confirm
+						// Phase 1: got pool name. The last gate is typing the name
+						// of the disk that dies - not y, not a stock word.
 						m.destPool = m.input.Value()
-						m.state = stateConfirm
-						m.confirmMsg = fmt.Sprintf("WARNING: You are about to erase all data on %s.\nThis will create encrypted ZFS pool '%s'.\nThis action is irreversible!\nAre you absolutely sure?", m.devicePath, m.destPool)
-						m.confirmYes = false
-						return m, nil
+						candidate, found := findCandidate(m.deviceCandidates, m.devicePath)
+						if !found || !candidate.Selectable() {
+							m.state = stateDevicePick
+							m.devicePickReady = false
+							return m, tea.Batch(m.spinner.Tick, loadDeviceCandidates())
+						}
+						m = m.startTypedConfirm(
+							"THIS DISK WILL BE ERASED",
+							prepareConfirmDetail(candidate, m.destPool),
+							wipeConfirmationWord(m.devicePath))
+						return m, textinput.Blink
 					}
-					// Original behavior for other operations
-					m.devicePath = m.input.Value()
-					m.state = stateConfirm
-					m.confirmMsg = fmt.Sprintf("WARNING: You are about to erase all data on %s.\nThis action is irreversible!\nAre you absolutely sure?", m.input.Value())
-					m.confirmYes = false
+					// No other operation takes free-text input; anything else
+					// falling through here is a bug, not a wipe request.
 					return m, nil
 				}
 			case "esc":
@@ -1627,6 +1652,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateCleanupScreen(msg)
 		} else if m.state == stateRecoverPool {
 			return m.updateRecoverPoolScreen(msg)
+		} else if m.state == stateDevicePick {
+			return m.updateDevicePickScreen(msg)
+		} else if m.state == stateTypedConfirm {
+			return m.updateTypedConfirmScreen(msg)
 		} else if m.state == stateZpoolInfo {
 			switch msg.String() {
 			case "esc", "q":
@@ -2017,6 +2046,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cleanupReady = true
 		return m, nil
 
+	case devicesLoadedMsg:
+		if msg.err != nil {
+			m.state = stateResult
+			m.err = msg.err
+			m.message = ""
+			return m, nil
+		}
+		m.deviceCandidates = msg.candidates
+		if m.deviceIndex >= len(msg.candidates) {
+			m.deviceIndex = 0
+		}
+		m.devicePickReady = true
+		return m, nil
+
 	case poolHealthMsg:
 		m.recoverHealth = msg.health
 		if m.recoverRemedies == nil {
@@ -2369,6 +2412,10 @@ func (m model) renderContentNopad(width int) string {
 		content.WriteString(m.renderCleanupContent(width))
 	case stateRecoverPool:
 		content.WriteString(m.renderRecoverPoolContent(width))
+	case stateDevicePick:
+		content.WriteString(m.renderDevicePickContent(width))
+	case stateTypedConfirm:
+		content.WriteString(m.renderTypedConfirmContent(width))
 	case stateMaintenance:
 		content.WriteString(m.renderMaintenanceContent(width))
 	case stateQuotaManage:
@@ -2382,10 +2429,8 @@ func (m model) renderContentNopad(width int) string {
 	return content.String()
 }
 
-// renderMenuContent renders the main menu view
+// renderMenuContent renders the main menu view.
 func (m model) renderMenuContent(width, height int) string {
-	var b strings.Builder
-
 	// If we're selecting a saved remote host, show that UI
 	if m.selectingSavedHost {
 		return m.renderSavedHostSelection(width)
@@ -2396,45 +2441,7 @@ func (m model) renderMenuContent(width, height int) string {
 		return m.renderPoolSelectionContent(width)
 	}
 
-	// Render simple menu items - one line each
-	for i, item := range mainMenuItems {
-		var line string
-		if item.title == "---" {
-			// Separator - render danger zone header
-			separator := warningStyle.Render("──── Danger Zone ────")
-			centered := lipgloss.NewStyle().
-				Width(width).
-				Align(lipgloss.Center).
-				Render(separator)
-			b.WriteString("\n" + centered + "\n")
-			continue
-		}
-		if i == m.menuIndex {
-			// Selected item - highlighted
-			line = selectedItemStyle.Render(fmt.Sprintf("  ▶ %s %s", item.icon, item.title))
-		} else {
-			// Normal item
-			line = fmt.Sprintf("    %s %s", item.icon, item.title)
-		}
-		centered := lipgloss.NewStyle().
-			Width(width).
-			Align(lipgloss.Center).
-			Render(line)
-		b.WriteString(centered + "\n")
-	}
-
-	// Add spacing before description
-	b.WriteString("\n")
-
-	// Show description of selected item at the bottom
-	selectedItem := mainMenuItems[m.menuIndex]
-	descBox := lipgloss.NewStyle().
-		Width(width).
-		Align(lipgloss.Center).
-		Render(subtitleStyle.Render(selectedItem.description))
-	b.WriteString(descBox + "\n")
-
-	return b.String()
+	return m.renderMenu(width)
 }
 
 // renderPoolSelectionContent renders the pool selection UI
@@ -3265,10 +3272,10 @@ func (m model) renderHelpContent(width int) string {
   A beautiful TUI for managing ZFS backups.
 
 OPERATIONS
-  Backup ZFS (incremental)
+  Back Up Now
      Performs an incremental backup using syncoid.
 
-  Pull Remote Backup
+  Pull Backup From Remote
      Pulls incremental backup from a remote host via SSH.
      Requires SSH key-based auth to the remote host.
      Backups are namespaced by hostname on the backup drive.
@@ -3277,13 +3284,14 @@ OPERATIONS
      Pushes local ZFS snapshots to a remote backup server via SSH.
      Datasets are namespaced by local hostname on the remote pool.
 
-  Force Backup ZFS (destructive)
-     Forces a complete backup by deleting previous snapshots.
+  Force Full Backup
+     Deletes backup history and rebuilds from the current source
+     state. Guarded by a typed DESTROY confirmation.
 
   Restore Files
      Browse snapshots and restore files to any location.
 
-  Show zpool info
+  Pool Information
      Displays detailed pool structure, status and health.
 
   Pool Maintenance
@@ -3297,8 +3305,8 @@ OPERATIONS
      data, and the forceful step asks before it runs. The same screen
      is offered with f when an operation fails for this reason.
 
-  Manage Quotas
-     View and edit dataset quotas. Units: T, G, M, K.
+  Manage Datasets
+     View and edit dataset quotas; create and delete datasets.
 
   Backup Scope
      Tick the datasets you want backed up. Only those are
@@ -3317,7 +3325,10 @@ OPERATIONS
      destroyed.
 
   Prepare Backup Device
-     Creates an encrypted ZFS pool on a new external drive.
+     Erases a disk and creates an encrypted ZFS pool on it. The
+     disk comes from a vetted picker - anything mounted, in an
+     imported pool, or holding the running system is refused -
+     and you must type the disk's own name to proceed.
 
   Unmount Backup Disk
      Safely exports the pool and powers off the USB drive.
@@ -3330,7 +3341,7 @@ REQUIREMENTS
 
 DOCUMENTATION
   Press D to open online documentation
-  https://kartoza.github.io/zfs-backup
+  https://timlinux.github.io/zfs-backup
 
 Press esc/enter/q to return to menu`
 
