@@ -14,7 +14,7 @@ A beautiful TUI (Terminal User Interface) for managing ZFS backups, built with [
 - **Backup Scope** - Pick exactly which datasets are backed up; everything else is never touched
 - **Health Check** - `doctor` finds orphaned snapshots and quota pressure before it bites
 - **Multi-Host Backups** - Back up multiple machines to the same drive with hostname namespacing
-- **Pull Remote Backup** - Pull ZFS snapshots from remote servers via SSH
+- **Pull Backup From Remote** - Pull ZFS snapshots from remote servers via SSH
 - **Push Backup to Remote** - Push local snapshots to a remote backup server via SSH
 - **Force Backup** - Destructive backup option for out-of-sync scenarios
 - **Restore Files** - Dual-panel file explorer to browse snapshots and restore files
@@ -47,7 +47,7 @@ graph LR
     C -->|syncoid| F
 ```
 
-### Pull Remote Backup (remote server to local drive)
+### Pull Backup From Remote (remote server to local drive)
 
 ```mermaid
 graph LR
@@ -190,18 +190,18 @@ than half its quota.
 
 | Option | Description |
 |--------|-------------|
-| Backup ZFS (incremental) | Run efficient incremental backup of all local datasets |
-| Pull Remote Backup | Pull backup from a remote host via SSH |
+| Back Up Now | Run an incremental backup of the datasets in scope |
+| Pull Backup From Remote | Pull backup from a remote host via SSH |
 | Push Backup to Remote | Push local snapshots to a remote backup server |
 | Restore Files | Browse snapshots and restore individual files |
 | Backup Scope | Choose which datasets are backed up - anything else is never touched |
 | Backup Health Check | Find orphaned snapshots and datasets whose quota is filling with snapshots |
-| Show zpool info | View pool structure, health, datasets, and snapshots |
+| Pool Information | View pool structure, health, datasets, and snapshots |
 | Pool Maintenance | Start/stop scrubs, monitor pool health |
 | Recover Failed Backup | Fix broken sync state after interruption |
 | Unmount Backup Disk | Safely export pool and power off USB drive |
 | Prepare Backup Device | Create new encrypted ZFS pool on external drive |
-| Force Backup (destructive) | Reset backup when incremental chain is broken |
+| Force Full Backup | Reset backup when incremental chain is broken (typed confirmation) |
 
 ## Keyboard Shortcuts
 

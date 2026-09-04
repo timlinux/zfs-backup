@@ -17,7 +17,8 @@ Quick reference for all keyboard shortcuts in Kartoza ZFS Backup Tool.
 | ++arrow-up++ / ++k++ | Move up |
 | ++arrow-down++ / ++j++ | Move down |
 | ++enter++ | Select / Confirm |
-| ++escape++ | Go back / Cancel |
+| ++slash++ | Filter the main menu as you type |
+| ++escape++ | Go back / Cancel / Clear the filter |
 
 ## Confirmation Dialogs
 

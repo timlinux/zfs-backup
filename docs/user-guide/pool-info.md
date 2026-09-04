@@ -4,7 +4,7 @@ The Pool Information feature provides a comprehensive view of any ZFS pool's str
 
 ## Accessing Pool Information
 
-From the main menu, select **Show zpool info**.
+From the main menu, select **Pool Information**.
 
 ## Pool Selection
 

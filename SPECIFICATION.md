@@ -58,6 +58,9 @@ graph TB
 | cleanup_tui.go | Orphan cleanup screen: dry run, typed confirmation, outcome |
 | recovery.go | Pool health classification and the recovery escalation ladder |
 | recovery_tui.go | Guided pool recovery screen |
+| device.go | Block-device inspection and the wipe-veto rules |
+| prepare_tui.go | Vetted disk picker and typed-confirmation screens |
+| menu.go | Sectioned main menu with safety badges, detail pane and filtering |
 | state.go | Backup state management for resume functionality |
 | restore.go | Restore mode with dual-panel file explorer |
 | package.nix | Nix package definition |
@@ -382,21 +385,23 @@ stateDiagram-v2
 ## Functional Requirements
 
 ### FR-001: Main Menu Structure
-The main menu shall display items in this order:
-1. Backup ZFS (incremental)
-2. Remote Backup ZFS
-3. Restore Files
-4. Show zpool info
-5. Pool Maintenance
-6. Recover Failed Backup
-7. Unmount Backup Disk
-8. Help
-9. Exit
-10. --- Danger Zone ---
-11. Prepare Backup Device
-12. Force Backup ZFS (destructive)
+The main menu is organised into named sections, in workflow order:
 
-Navigation skips the separator when using up/down keys.
+- **Back Up**: Back Up Now, Push Backup to Remote, Pull Backup From Remote
+- **Restore**: Restore Files, Browse Backup Reports
+- **Health**: Backup Health Check, Clean Up Orphaned Snapshots, Recover
+  Failed Backup, Fix a Pool That Stopped Responding
+- **Pools**: Backup Scope, Pool Information, Pool Maintenance, Manage
+  Datasets, Unmount Backup Disk
+- **Danger Zone**: Prepare Backup Device, Force Full Backup
+
+Every entry declares a safety level (read-only / makes changes /
+destructive) and, when destructive, the guard that protects it. On wide
+terminals a detail pane shows the highlighted entry's full contract - what
+it touches and what it never touches - before the user commits. `/` starts
+a type-ahead filter over titles and descriptions. Navigation skips section
+headers; destructive entries are marked and live behind the Danger Zone
+fence. Help and Exit are footer keys (`?` and `q`), not menu entries.
 
 ### FR-002: Pool Selection
 - Display all available ZFS pools (imported and importable)
@@ -570,7 +575,7 @@ sudo -E env "PATH=$PATH" go test -tags integration -run TestIntegration -v ./...
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 2.1.0 | 2026-09 | Guided in-app pool recovery for a suspended pool; build commit shown beside the version. Fixed layout migration failing when a dataset shares the hostname's name, and blocked backing a pool up onto itself. Orphan cleanup moved into the TUI: a main-menu item and a `c` key on the health check screen, with a dry-run-first screen and typed `DESTROY` confirmation. CLI and TUI now share one cleanup implementation |
+| 2.1.0 | 2026-09 | Redesigned sectioned menu with safety badges and filtering; vetted disk picker and typed confirmations guard the destructive flows. Guided in-app pool recovery for a suspended pool; build commit shown beside the version. Fixed layout migration failing when a dataset shares the hostname's name, and blocked backing a pool up onto itself. Orphan cleanup moved into the TUI: a main-menu item and a `c` key on the health check screen, with a dry-run-first screen and typed `DESTROY` confirmation. CLI and TUI now share one cleanup implementation |
 | 2.0.0 | 2026-08 | **Breaking:** snapshot scope now equals replication scope - no more recursive pool snapshots. Per-pool backup scope selection, `doctor` and `cleanup-orphans` subcommands, pruning fixed to cover every dataset, `--no-sync-snap`, failed datasets exit non-zero |
 | 1.6.0 | 2026-06 | Per-snapshot progress tracking, automatic legacy layout migration, unmounted datasets included, Kartoza brand mkdocs theme |
 | 1.5.0 | 2026-05 | Comprehensive PDF and markdown reports with full pool inventory (datasets, sizes, quotas, compression, snapshots), narrative summary, operation log, and next steps |

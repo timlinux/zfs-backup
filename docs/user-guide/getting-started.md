@@ -41,7 +41,7 @@ Use these keys to navigate:
 
 ### Step 1: Select Backup Operation
 
-From the main menu, select **Backup ZFS (incremental)**.
+From the main menu, select **Back Up Now**.
 
 ### Step 2: Choose Source Pool
 

@@ -11,8 +11,30 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [2.1.0] - 2026-09-03
 
+### Security
+
+- **Preparing a backup device can no longer wipe the wrong disk.** The old
+  flow accepted a free-typed /dev path - its placeholder was literally
+  `/dev/sda` - and erased it after a single `y`. The disk is now chosen from
+  a vetted picker: anything mounted, in use by an imported ZFS pool, or
+  holding the running system is listed but refused, with the reason shown.
+  Before wiping, the user must type the disk's own name (not a stock word),
+  and `performPrepare` re-vets the disk immediately before touching it, so
+  even a future caller that skips the picker cannot wipe a disk the system
+  is using.
+- **Force Full Backup now demands a typed DESTROY.** It deletes every backup
+  snapshot on the destination pool; that cost is now named, pool and all,
+  and must be typed - a single `y` no longer suffices.
+
 ### Added
 
+- **The main menu was redesigned.** Operations are grouped into named
+  sections (Back Up, Restore, Health, Pools, Danger Zone) in workflow order.
+  Every entry carries a safety badge - read-only, makes changes, or
+  destructive - and on wide terminals a detail pane shows the highlighted
+  operation's full contract: what it touches and what it never touches,
+  plus the guard on destructive entries. `/` filters the menu as you type.
+  Help and Exit moved to the footer keys they already had (`?`, `q`).
 - **A pool that stops responding can now be fixed from the app.** When ZFS
   suspends I/O to a pool, the failure screen offers `f` to open a guided
   recovery, and there is a **Fix a Pool That Stopped Responding** menu item.
