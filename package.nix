@@ -5,6 +5,9 @@
   zfs,
   sanoid,
   udisks2,
+  # Short git SHA this build came from, shown beside the version so a running
+  # binary can be matched to its source. The flake passes the real value.
+  rev ? "unknown",
 }:
 
 buildGoModule rec {
@@ -40,6 +43,7 @@ buildGoModule rec {
     "-s"
     "-w"
     "-X main.appVersion=${version}"
+    "-X main.appCommit=${rev}"
   ];
 
   meta = with lib; {

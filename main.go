@@ -22,6 +22,20 @@ import (
 // Source of truth: VERSION file in the repo root.
 var appVersion = "dev"
 
+// appCommit is the short git SHA this binary was built from, set at build time
+// via -ldflags "-X main.appCommit=...". It is shown beside the version so a
+// running binary can be matched to the source it came from - a version number
+// alone cannot tell you whether a rebuild actually took effect.
+var appCommit = "unknown"
+
+// versionLabel renders the version with the commit it was built from.
+func versionLabel() string {
+	if appCommit == "" || appCommit == "unknown" {
+		return appVersion
+	}
+	return fmt.Sprintf("%s (%s)", appVersion, appCommit)
+}
+
 // Application constants
 const (
 	appName    = "Kartoza ZFS Backup"
@@ -224,7 +238,7 @@ func renderHeader(width int, status string) string {
 	b.WriteString(line1 + "\n")
 
 	// Status line - centered
-	statusText := fmt.Sprintf("Version %s │ Status: %s", appVersion, status)
+	statusText := fmt.Sprintf("Version %s │ Status: %s", versionLabel(), status)
 	statusLine := lipgloss.NewStyle().
 		Width(width).
 		Align(lipgloss.Center).
@@ -3146,11 +3160,7 @@ func (m model) renderResultContent(width int) string {
 			Render(errorStyle.Render("Operation Failed"))
 		b.WriteString(contentTitle + "\n\n")
 
-		errMsg := lipgloss.NewStyle().
-			Width(width).
-			Align(lipgloss.Center).
-			Render(errorStyle.Render(m.err.Error()))
-		b.WriteString(errMsg + "\n\n")
+		b.WriteString(renderErrorDetail(m.err, width) + "\n\n")
 
 		hint := subtitleStyle.Render("Press enter/esc/q to return to menu")
 		b.WriteString(lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(hint))
@@ -4087,7 +4097,7 @@ func main() {
 	if len(os.Args) > 1 {
 		arg := os.Args[1]
 		if arg == "--version" || arg == "-v" {
-			fmt.Println(appVersion)
+			fmt.Println(versionLabel())
 			return
 		}
 		if arg == "--help" || arg == "-h" {
@@ -4143,7 +4153,7 @@ func handleCLI() {
 	case "scope":
 		os.Exit(handleScopeCLI(rest))
 	case "--version", "-v":
-		fmt.Println(appVersion)
+		fmt.Println(versionLabel())
 	case "--help", "-h":
 		showCLIHelp()
 	default:
@@ -4321,7 +4331,7 @@ func showCLIHelp() {
 	fmt.Println(titleStyle.Render(appName))
 	fmt.Println(taglineStyle.Render(appTagline))
 	fmt.Println(interstitialStyle.Render(strings.Repeat("─", 50)))
-	fmt.Println(statusLineStyle.Render(fmt.Sprintf("Version %s", appVersion)))
+	fmt.Println(statusLineStyle.Render(fmt.Sprintf("Version %s", versionLabel())))
 	fmt.Println(interstitialStyle.Render(strings.Repeat("─", 50)))
 	fmt.Println()
 
@@ -4373,4 +4383,27 @@ Note: If you have ZFS delegation configured for your user, you can omit sudo.`
 	fmt.Println(interstitialStyle.Render(strings.Repeat("─", 50)))
 	fmt.Println(footerCreditStyle.Render("Made with <3 by Kartoza | Donate! | GitHub"))
 	fmt.Println()
+}
+
+// renderErrorDetail lays out a failure for the result screen.
+//
+// The first line says what failed and is centred. Anything after it is
+// guidance whose indentation and command lines carry meaning, so it goes in a
+// left-aligned box: centring those line by line would scatter the commands
+// across the screen and make them unreadable.
+func renderErrorDetail(err error, width int) string {
+	centre := lipgloss.NewStyle().Width(width).Align(lipgloss.Center)
+
+	headline, detail, hasDetail := strings.Cut(err.Error(), "\n")
+	out := centre.Render(errorStyle.Render(headline))
+	if !hasDetail {
+		return out
+	}
+
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return out
+	}
+
+	return out + "\n\n" + centre.Render(reportBoxStyle.Render(detail))
 }

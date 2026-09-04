@@ -15,7 +15,9 @@
     {
       # Overlay to add zfs-backup to pkgs
       overlays.default = final: prev: {
-        zfs-backup = final.callPackage ./package.nix { };
+        zfs-backup = final.callPackage ./package.nix {
+          rev = self.shortRev or self.dirtyShortRev or "unknown";
+        };
       };
 
       # NixOS module
@@ -28,7 +30,9 @@
       in
       {
         packages = {
-          zfs-backup = pkgs.callPackage ./package.nix { };
+          zfs-backup = pkgs.callPackage ./package.nix {
+            rev = self.shortRev or self.dirtyShortRev or "unknown";
+          };
           default = self.packages.${system}.zfs-backup;
         };
 

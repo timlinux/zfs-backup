@@ -1760,7 +1760,7 @@ func runCommand(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%s failed: %w\nOutput: %s", name, err, string(output))
+		return commandFailure(name, err, output)
 	}
 	return nil
 }
@@ -1836,7 +1836,7 @@ func runCommandOutput(name string, args ...string) (string, error) {
 		// ZFS explains itself on stderr - "cannot open 'POOL': dataset does not
 		// exist" and the like. Reporting only "exit status 1" turns a
 		// self-explaining failure into a support question, so keep the text.
-		return "", fmt.Errorf("%s failed: %w%s", name, err, formatCommandOutput(output))
+		return "", commandFailure(name, err, output)
 	}
 	return string(output), nil
 }
@@ -2545,4 +2545,55 @@ func ensurePoolKeyLoaded(destPool, password string, output *strings.Builder) err
 	}
 
 	return nil
+}
+
+// =============================================================================
+// Turning ZFS failures into something the user can act on
+// =============================================================================
+
+// suspendedPoolPattern matches the wording ZFS uses when it has stopped all
+// I/O to a pool, usually because the pool's devices went away underneath it.
+var suspendedPoolPattern = regexp.MustCompile(`(?i)pool i/o is currently suspended|the pool is suspended|state:\s*SUSPENDED`)
+
+// quotedNamePattern pulls the pool or dataset out of "cannot open 'NAME': ...".
+var quotedNamePattern = regexp.MustCompile(`cannot open '([^']+)'`)
+
+// diagnoseZFSFailure turns a raw ZFS message into guidance, for the failures a
+// user must fix outside zfs-backup. Returns "" when there is nothing useful to
+// add, so ordinary errors are not padded with noise.
+func diagnoseZFSFailure(output string) string {
+	if !suspendedPoolPattern.MatchString(output) {
+		return ""
+	}
+
+	pool := "POOL"
+	if m := quotedNamePattern.FindStringSubmatch(output); len(m) > 1 {
+		// The message names a dataset; the pool is its first component.
+		pool = strings.SplitN(m[1], "/", 2)[0]
+	}
+
+	return fmt.Sprintf(`ZFS has suspended all I/O to this pool. Its device almost certainly
+disappeared mid-operation - drive unplugged, cable knocked, or a USB
+enclosure dropping off the bus. zfs-backup cannot fix this and will keep
+failing until the pool is back. The suspension itself loses no data.
+
+Reconnect the drive, then ask ZFS to retry:
+    sudo zpool clear %[1]s
+
+If that hangs or fails, force it out and back in:
+    sudo zpool export -f %[1]s && sudo zpool import %[1]s
+
+If commands touching %[1]s hang, reboot to clear the suspension.
+Check it is healthy before backing up again:
+    zpool status %[1]s`, pool)
+}
+
+// commandFailure builds the error for a failed command: what ran, what it
+// said, and - where we can recognise the condition - what to do about it.
+func commandFailure(name string, err error, output []byte) error {
+	detail := formatCommandOutput(output)
+	if guidance := diagnoseZFSFailure(string(output)); guidance != "" {
+		detail += "\n\n" + guidance
+	}
+	return fmt.Errorf("%s failed: %w%s", name, err, detail)
 }
