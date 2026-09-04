@@ -13,6 +13,27 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **ZFS errors now say what ZFS actually said.** `runCommandOutput` captured
+  the command's output and then discarded it, so every failure reached the
+  user as `zfs failed: exit status 1` - a message naming neither the problem
+  nor the pool. The captured text is now part of the error, turning
+  "failed to check key status: zfs failed: exit status 1" into
+  "...: cannot open 'NIXBACKUPS': dataset does not exist".
+- **A pool is no longer mistaken for one whose name contains it.**
+  `isPoolImported` substring-matched the whole `zpool list` table, so a longer
+  pool name or a column heading counted as a match. The import stage then
+  reported success without importing anything and the next stage failed
+  against a pool that was not there. Pool names are now matched exactly.
+- **Resuming re-checks the pool import and key load.** Both were skipped when
+  a previous run had marked them complete, but neither stays true: a drive can
+  be unplugged, a pool exported, a machine rebooted. Both are idempotent and
+  cheap, so a resumed run re-checks them instead of assuming. Genuinely
+  expensive stages are still skipped as before.
+- **An unencrypted backup pool no longer fails the key stage.** ZFS reports
+  keystatus `-` for a dataset with no encryption, which is not the same as a
+  key that is not loaded yet; the two are now distinguished. The three copies
+  of this logic were merged into one.
+
 - **Backup no longer fails when a dataset shares the hostname's name.** On
   host `abyss`, a dataset called `abyss` made the legacy flat path
   (`NIXBACKUPS/abyss`) and the hostname namespace container
