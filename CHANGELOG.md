@@ -11,7 +11,26 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [2.1.0] - 2026-09-03
 
+### Added
+
+- **The version header now shows the commit the binary was built from**, e.g.
+  `Version 2.1.0 (fa247f7)`. A version number alone cannot tell you whether a
+  rebuild actually took effect. The flake, `package.nix` and the Makefile all
+  inject it; a build with no SHA available shows the bare version rather than
+  empty brackets.
+
 ### Fixed
+
+- **A suspended pool is now explained instead of leaked.**
+  `pool I/O is currently suspended` means ZFS lost the pool's devices - an
+  external drive unplugged, a cable knocked, a USB enclosure dropping off the
+  bus - and no amount of retrying inside zfs-backup will help. The error now
+  names the condition and gives the recovery steps (`zpool clear`, forced
+  export and re-import, reboot) with the pool name filled in.
+- **Multi-line errors are no longer centred line by line.** The result screen
+  centred every line of an error independently, which scattered indented
+  command lines across the screen. The headline is still centred; the detail
+  is left-aligned in a box so commands stay readable and copy-pasteable.
 
 - **ZFS errors now say what ZFS actually said.** `runCommandOutput` captured
   the command's output and then discarded it, so every failure reached the
