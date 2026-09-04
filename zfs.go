@@ -121,21 +121,21 @@ func getRemoteChildDatasets(sshHost, pool string) ([]string, error) {
 type DatasetSyncStatus int
 
 const (
-	DatasetPending  DatasetSyncStatus = iota // Not yet started
-	DatasetSyncing                           // Currently being synced
-	DatasetDone                              // Successfully synced
-	DatasetError                             // Sync failed
-	DatasetSkipped                           // Skipped (e.g. destination creation failed)
+	DatasetPending DatasetSyncStatus = iota // Not yet started
+	DatasetSyncing                          // Currently being synced
+	DatasetDone                             // Successfully synced
+	DatasetError                            // Sync failed
+	DatasetSkipped                          // Skipped (e.g. destination creation failed)
 )
 
 // SnapshotStatus represents the sync state of a single snapshot dot
 type SnapshotStatus int
 
 const (
-	SnapPending  SnapshotStatus = iota // Gray - not yet synced
-	SnapSyncing                        // Orange - currently being transferred
-	SnapDone                           // Blue - synced successfully
-	SnapError                          // Red - sync failed
+	SnapPending SnapshotStatus = iota // Gray - not yet synced
+	SnapSyncing                       // Orange - currently being transferred
+	SnapDone                          // Blue - synced successfully
+	SnapError                         // Red - sync failed
 )
 
 // SnapshotDot represents one snapshot in the dot matrix
@@ -2470,7 +2470,7 @@ func generateBackupReport(sourcePool, destPool string, datasets []string) (strin
 	output, err := runCommandOutput("zfs", "list", "-t", "snapshot", "-o", "name,creation", "-s", "creation")
 	if err == nil {
 		for _, line := range strings.Split(output, "\n") {
-			dataset, _, ok := splitSnapshot(strings.TrimSpace(strings.Fields(line+" ")[0]))
+			dataset, _, ok := splitSnapshot(strings.TrimSpace(strings.Fields(line + " ")[0]))
 			if !ok {
 				continue
 			}
