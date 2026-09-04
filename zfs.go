@@ -915,6 +915,22 @@ func performPrepare(device, poolName, password string) (string, error) {
 		return "", fmt.Errorf("encryption passphrase not specified")
 	}
 
+	// Vet the disk again immediately before wiping. The picker already did,
+	// but disks get re-plugged and filesystems get mounted between the pick
+	// and the confirmation - and this function must hold the line even if a
+	// future caller reaches it without going through the picker at all.
+	candidates, err := collectDeviceCandidates(context.Background(), defaultRunner)
+	if err != nil {
+		return "", fmt.Errorf("refusing to prepare %s: %w", device, err)
+	}
+	candidate, found := findCandidate(candidates, device)
+	if !found {
+		return "", fmt.Errorf("refusing to prepare %s: no such disk is attached", device)
+	}
+	if !candidate.Selectable() {
+		return "", fmt.Errorf("refusing to prepare %s: %s", device, candidate.Vetoes[0].Reason)
+	}
+
 	output.WriteString(fmt.Sprintf("[SETUP]Preparing backup device: %s\n", device))
 
 	// Step 1: Clear any existing ZFS labels on the device
