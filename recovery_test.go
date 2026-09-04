@@ -99,6 +99,7 @@ func TestRemediesEscalateGentlestFirst(t *testing.T) {
 }
 
 func TestApplyRemedyStopsAtTheFirstFailure(t *testing.T) {
+	useFakeProcRoot(t, map[string]string{})
 	runner := &fakeRunner{
 		respond: func(name string, args []string) (string, error) {
 			if len(args) > 0 && args[0] == "export" {
@@ -125,6 +126,7 @@ func TestApplyRemedyStopsAtTheFirstFailure(t *testing.T) {
 // After every remedy the pool is re-checked, so the screen never claims
 // success it has not verified.
 func TestApplyRemedyAlwaysRechecksThePool(t *testing.T) {
+	useFakeProcRoot(t, map[string]string{})
 	runner := &fakeRunner{
 		respond: func(_ string, _ []string) (string, error) {
 			return "  pool: NIXBACKUPS\n state: ONLINE\n", nil

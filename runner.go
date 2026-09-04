@@ -5,8 +5,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"os/exec"
 )
 
 // commandRunner abstracts external command execution so that the snapshot,
@@ -24,19 +22,20 @@ type commandRunner interface {
 type execRunner struct{}
 
 func (execRunner) Run(ctx context.Context, name string, args ...string) error {
-	return runCommandWithContext(ctx, name, args...)
+	timeout := actionTimeout
+	if _, has := ctx.Deadline(); has {
+		timeout = 0 // the caller's deadline governs
+	}
+	_, err := execWithDeadline(ctx, timeout, name, args...)
+	return err
 }
 
 func (execRunner) Output(ctx context.Context, name string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		if ctx.Err() != nil {
-			return "", fmt.Errorf("operation cancelled")
-		}
-		return "", fmt.Errorf("%s failed: %w\nOutput: %s", name, err, string(output))
+	timeout := queryTimeout
+	if _, has := ctx.Deadline(); has {
+		timeout = 0
 	}
-	return string(output), nil
+	return execWithDeadline(ctx, timeout, name, args...)
 }
 
 // defaultRunner is the commandRunner used by the application entry points.

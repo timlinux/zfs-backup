@@ -4272,6 +4272,19 @@ func main() {
 		}
 	}
 
+	// Say so IMMEDIATELY if a pool is suspended - read from procfs, which
+	// never blocks. Without this, the first zpool query would stall for its
+	// whole deadline with no explanation, which reads as a hang.
+	if pools := suspendedPoolsFromProc(); len(pools) > 0 {
+		fmt.Fprintln(os.Stderr, warningStyle.Render(fmt.Sprintf(
+			"NOTE: pool %s has SUSPENDED I/O (device lost - usually an unplugged\n"+
+				"backup drive). Commands touching it are slow or time out. Reconnect\n"+
+				"the drive and run: sudo zpool clear %s - or use 'Fix a Pool That\n"+
+				"Stopped Responding' in the menu. It is safe to leave it suspended.",
+			strings.Join(pools, ", "), pools[0])))
+		fmt.Fprintln(os.Stderr)
+	}
+
 	// Check permissions first
 	if err := checkPermissions(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))

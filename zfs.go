@@ -1772,13 +1772,11 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 
 // Helper functions
 
+// runCommand runs an action command with the action deadline, abandoning it
+// if a wedged pool stops it returning - see wedge.go.
 func runCommand(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return commandFailure(name, err, output)
-	}
-	return nil
+	_, err := execWithDeadline(context.Background(), actionTimeout, name, args...)
+	return err
 }
 
 func runCommandWithContext(ctx context.Context, name string, args ...string) error {
@@ -1845,16 +1843,11 @@ func loadZFSKey(dataset, password string) error {
 	return nil
 }
 
+// runCommandOutput runs a query with the query deadline. ZFS explains itself
+// on stderr, and commandFailure keeps that text; a command that never
+// returns is abandoned rather than hanging the UI - see wedge.go.
 func runCommandOutput(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// ZFS explains itself on stderr - "cannot open 'POOL': dataset does not
-		// exist" and the like. Reporting only "exit status 1" turns a
-		// self-explaining failure into a support question, so keep the text.
-		return "", commandFailure(name, err, output)
-	}
-	return string(output), nil
+	return execWithDeadline(context.Background(), queryTimeout, name, args...)
 }
 
 // formatCommandOutput renders captured command output for an error message,

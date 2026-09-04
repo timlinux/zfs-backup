@@ -105,8 +105,17 @@ func parsePoolHealth(pool, output string, cmdErr error) poolHealth {
 	return health
 }
 
-// checkPoolHealth asks ZFS about a pool, under a deadline.
+// checkPoolHealth asks ZFS about a pool, under a deadline. The kernel's own
+// procfs state is consulted first: it answers instantly and never blocks,
+// where zpool status on a suspended pool can wedge for the full deadline.
 func checkPoolHealth(ctx context.Context, r commandRunner, pool string) poolHealth {
+	if state, ok := poolStateFromProc(pool); ok && strings.EqualFold(state, "SUSPENDED") {
+		return poolHealth{
+			Pool:  pool,
+			State: poolSuspended,
+			Raw:   "the kernel reports this pool as SUSPENDED (read from procfs, no pool I/O issued)",
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, poolCommandTimeout)
 	defer cancel()
 
@@ -211,7 +220,9 @@ const exhaustedGuidance = "Everything zfs-backup can safely try has been tried a
 	"not responding. That points at the hardware rather than at ZFS:\n\n" +
 	"  - Check the drive is powered and its cable is firmly seated.\n" +
 	"  - Try a different cable, port, or USB enclosure - failing enclosures\n" +
-	"    are a far more common cause of this than failing disks.\n" +
-	"  - A reboot clears a suspension the kernel will not let go of.\n\n" +
-	"The data is not lost by a suspension. Once the devices come back, the\n" +
-	"pool imports normally."
+	"    are a far more common cause of this than failing disks.\n\n" +
+	"A suspended pool is a SAFE holding state: it harms nothing else on this\n" +
+	"system and loses no data - it only wedges commands that touch it, and\n" +
+	"they resume by themselves the moment the pool comes back. It can stay\n" +
+	"suspended until you have the right cable or a maintenance window; a\n" +
+	"reboot is the last resort, not a troubleshooting step."
