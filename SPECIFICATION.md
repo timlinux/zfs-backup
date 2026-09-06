@@ -382,6 +382,68 @@ stateDiagram-v2
 - Pool selection cursor pre-positions on the smart default
 - Falls back gracefully if no matching pool is found
 
+### US-019: Destination Vetting Invariant
+
+**As a** user whose machine boots from a ZFS pool
+**I want** zfs-backup to refuse the pool holding my running system as a local
+backup destination
+**So that** a swapped pool selection can never migrate, prune or export my
+live datasets
+
+**The invariant:**
+
+> A pool with a dataset mounted at a critical system path (`/`, `/home`,
+> `/nix`, `/boot`, `/etc`, `/usr`, `/var`) must never be the destination of a
+> local backup.
+
+**Rationale:** the local backup flow treats its destination as a disposable
+backup medium - the legacy-layout migration renames the destination's flat
+datasets into `<destPool>/<hostname>/...`, pruning destroys destination
+snapshots, and the run ends by exporting the pool. Pointed at the boot pool,
+those steps relocate or destroy live data.
+
+**Acceptance Criteria:**
+- `performBackup` and `performForceBackup` refuse a system pool as
+  destination before touching anything, with an error that names the mounted
+  datasets and points at the legitimate alternative.
+- The legacy-layout migration independently refuses to plan renames on a
+  system pool, even if a future caller forgets to vet.
+- The destination pool picker marks system pools as not selectable for local
+  backups and explains why when one is chosen anyway.
+- **The one legitimate write into a system pool is the pull-from-remote
+  flow**: backing up a remote host into the local root pool is allowed, but
+  only ever namespaced under `<pool>/<remote-hostname>/...` - it never
+  migrates, prunes, renames or exports, and never touches datasets outside
+  that namespace.
+- A pool that is not imported passes the vet: the running system's pool is by
+  definition imported, and the destination is typically an external drive
+  that stage 1 imports later.
+
+### US-020: Replication Targets Are Never Pre-Created
+
+**As a** user backing up to a freshly prepared disk
+**I want** the first backup of every dataset to succeed
+**So that** a new backup drive works on its first run
+
+**The rule:**
+
+> The leaf target dataset of a replication is never created by zfs-backup;
+> only the parent hierarchy is. syncoid refuses to replicate into an existing
+> dataset that shares no snapshot with the source, so a pre-created empty
+> target makes every first sync fail.
+
+**Acceptance Criteria:**
+- Before syncing, only the target's parent hierarchy is created if missing;
+  the leaf is left for syncoid's initial full send to create.
+- Empty debris left by older versions that did pre-create the leaf (no
+  snapshots, no children, no resume token, metadata-sized usage) is destroyed
+  during preflight so replication can proceed, and the repair is noted in the
+  run log.
+- A target with snapshots, children, real data, or a resumable partial
+  receive is never touched by the preflight.
+- When datasets fail to replicate, the failure screen names each dataset
+  **with the reason syncoid or ZFS gave**, not just the dataset names.
+
 ## Functional Requirements
 
 ### FR-001: Main Menu Structure

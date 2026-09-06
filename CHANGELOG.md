@@ -9,6 +9,38 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-09-06
+
+### Security
+
+- **The pool holding the running system can no longer be a local backup
+  destination.** With the pools swapped, the legacy-layout migration treated
+  the live root pool as a messy backup disk: it created a hostname namespace
+  on it and began renaming live datasets inside (on the machine this was
+  found on, `NIXROOT/atuin` ended up in `NIXROOT/abyss/atuin`; only a failed
+  rename on a mounted dataset stopped `/home` following it). A destination
+  with any dataset mounted at `/`, `/home`, `/nix`, `/boot`, `/etc`, `/usr`
+  or `/var` is now refused before a run touches anything - by the backup and
+  force-backup flows, independently by the migration itself, and visibly in
+  the destination pool picker. Backing up a **remote** host into the local
+  root pool remains possible via Pull Remote Backup, which only ever writes
+  under `<pool>/<remote-hostname>/`.
+
+### Fixed
+
+- **The first backup onto a fresh disk no longer fails on every dataset.**
+  The sync stage pre-created each destination dataset before invoking
+  syncoid, and syncoid refuses to replicate into an existing dataset that
+  shares no snapshot with the source ("did you mistakenly run zfs create on
+  the target?"). Only the parent hierarchy is created now; syncoid's initial
+  full send creates the leaf. Empty debris left by the old behaviour (no
+  snapshots, no children, no resume token, metadata-sized usage) is removed
+  during preflight so an already-affected disk heals on its next run.
+- **The failure screen now says why each dataset failed.** A run that could
+  not replicate everything used to name the casualties and nothing else; the
+  error now carries each dataset's actual syncoid/ZFS message, and the run
+  log records the untruncated reasons.
+
 ## [2.1.0] - 2026-09-03
 
 ### Security
