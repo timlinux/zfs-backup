@@ -508,6 +508,11 @@ type model struct {
 	selectingPool   bool // Are we in pool selection mode?
 	poolSelectIndex int  // Current pool selection index
 	selectingSource bool // true = selecting source, false = selecting dest
+	// systemPools maps each available pool to the reason it counts as
+	// hosting the running system ("" absent = safe). Such a pool is refused
+	// as a local backup destination - see systempool.go.
+	systemPools       map[string]string
+	poolSelectMessage string // Why the last selection was refused, if it was
 	// Progress channel for real-time updates
 	progressChan chan progressUpdate
 	// Per-dataset sync progress (populated during sync stage)
@@ -969,6 +974,34 @@ func detectPools(pools []string) (sourcePool, destPool string) {
 	return sourcePool, destPool
 }
 
+// detectSystemPools maps each pool to the reason it hosts the running system
+// ("" entries are omitted). Only imported pools can match, and the checks are
+// quick zfs list queries, so this is cheap to compute on entering the picker.
+func detectSystemPools(pools []string) map[string]string {
+	system := make(map[string]string, len(pools))
+	for _, pool := range pools {
+		if reason := systemPoolReason(context.Background(), defaultRunner, pool); reason != "" {
+			system[pool] = reason
+		}
+	}
+	return system
+}
+
+// vetDestPoolSelection reports why a pool may not be picked in the current
+// selection context, or "" when it may. Only the destination of a local
+// backup is restricted: the pull-from-remote flow may deliberately target a
+// system pool (namespaced under the remote hostname), and informational
+// screens may look at any pool.
+func (m model) vetDestPoolSelection(pool string) string {
+	if m.selectingSource {
+		return ""
+	}
+	if m.operation != "backup" && m.operation != "force-backup" {
+		return ""
+	}
+	return m.systemPools[pool]
+}
+
 // getAvailablePools returns a list of currently imported ZFS pools
 func getAvailablePools() []string {
 	output, err := runCommandOutput("zpool", "list", "-H", "-o", "name")
@@ -1029,6 +1062,8 @@ func (m *model) startPoolSelection(selectSource bool) {
 	m.selectingPool = true
 	m.selectingSource = selectSource
 	m.poolSelectIndex = 0
+	m.poolSelectMessage = ""
+	m.systemPools = detectSystemPools(m.availablePools)
 
 	// Pre-select a smart default based on BACKUP keyword
 	if selectSource {
@@ -1184,15 +1219,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.poolSelectIndex > 0 {
 					m.poolSelectIndex--
 				}
+				m.poolSelectMessage = ""
 				return m, nil
 			case "down", "j":
 				if m.poolSelectIndex < len(m.availablePools)-1 {
 					m.poolSelectIndex++
 				}
+				m.poolSelectMessage = ""
 				return m, nil
 			case "enter":
 				if len(m.availablePools) > 0 {
 					selectedPool := m.availablePools[m.poolSelectIndex]
+					if reason := m.vetDestPoolSelection(selectedPool); reason != "" {
+						m.poolSelectMessage = fmt.Sprintf(
+							"%s holds the running system: %s. Pick the external backup pool.",
+							selectedPool, reason)
+						return m, nil
+					}
 					if m.selectingSource {
 						m.sourcePool = selectedPool
 
@@ -2496,6 +2539,31 @@ func (m model) renderMenuContent(width, height int) string {
 }
 
 // renderPoolSelectionContent renders the pool selection UI
+// renderPoolList draws the selectable pool rows, marking any pool the current
+// selection context refuses (a system pool offered as a local backup
+// destination) so the refusal is visible before enter is pressed.
+func (m model) renderPoolList(width int) string {
+	var b strings.Builder
+	for i, pool := range m.availablePools {
+		label := pool
+		if m.vetDestPoolSelection(pool) != "" {
+			label = pool + "  (system pool - not selectable)"
+		}
+		var line string
+		if i == m.poolSelectIndex {
+			line = selectedItemStyle.Render(fmt.Sprintf("  ▶ %s", label))
+		} else {
+			line = fmt.Sprintf("    %s", label)
+		}
+		centered := lipgloss.NewStyle().
+			Width(width).
+			Align(lipgloss.Center).
+			Render(line)
+		b.WriteString(centered + "\n")
+	}
+	return b.String()
+}
+
 func (m model) renderPoolSelectionContent(width int) string {
 	var b strings.Builder
 
@@ -2543,33 +2611,17 @@ func (m model) renderPoolSelectionContent(width int) string {
 			Render(warningStyle.Render("Only imported pools shown. External drives may need sudo."))
 		b.WriteString(warnLine + "\n\n")
 
-		for i, pool := range m.availablePools {
-			var line string
-			if i == m.poolSelectIndex {
-				line = selectedItemStyle.Render(fmt.Sprintf("  ▶ %s", pool))
-			} else {
-				line = fmt.Sprintf("    %s", pool)
-			}
-			centered := lipgloss.NewStyle().
-				Width(width).
-				Align(lipgloss.Center).
-				Render(line)
-			b.WriteString(centered + "\n")
-		}
+		b.WriteString(m.renderPoolList(width))
 	} else {
-		for i, pool := range m.availablePools {
-			var line string
-			if i == m.poolSelectIndex {
-				line = selectedItemStyle.Render(fmt.Sprintf("  ▶ %s", pool))
-			} else {
-				line = fmt.Sprintf("    %s", pool)
-			}
-			centered := lipgloss.NewStyle().
-				Width(width).
-				Align(lipgloss.Center).
-				Render(line)
-			b.WriteString(centered + "\n")
-		}
+		b.WriteString(m.renderPoolList(width))
+	}
+
+	if m.poolSelectMessage != "" {
+		b.WriteString("\n")
+		b.WriteString(lipgloss.NewStyle().
+			Width(width).
+			Align(lipgloss.Center).
+			Render(warningStyle.Render(m.poolSelectMessage)) + "\n")
 	}
 
 	return b.String()

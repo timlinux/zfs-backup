@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -278,6 +279,12 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 	if sourcePool == destPool {
 		return "", fmt.Errorf("source and destination are both %s - a pool cannot be backed up onto itself", sourcePool)
 	}
+	// The destination vetting invariant - see systempool.go. Checked before
+	// stage 1: the running system's pool is always already imported, so an
+	// unimported external drive passes and a system pool is caught here.
+	if err := vetLocalBackupDestination(ctx, defaultRunner, destPool); err != nil {
+		return "", err
+	}
 
 	output.WriteString(fmt.Sprintf("Backing up %s → %s\n\n", sourcePool, destPool))
 
@@ -440,6 +447,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 	// Datasets whose replication failed. Collected during the sync stage and
 	// reported at the end of the run so the process exits non-zero.
 	var failedDatasets []string
+	failedReasons := map[string]string{}
 
 	// Stage 4: Sync the datasets in scope
 	err = executeStage(StageSyncData, "📨 Syncing data to backup disk", func() error {
@@ -481,13 +489,14 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 			dsProgress[i].Status = DatasetSyncing
 			sendDatasetProgress(progressChan, fmt.Sprintf("Syncing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 
-			if err := ensureDatasetExists(ctx, syncDest); err != nil {
+			if err := preflightSyncTarget(ctx, defaultRunner, syncDest, &output); err != nil {
 				dsProgress[i].Status = DatasetSkipped
-				dsProgress[i].ErrorMsg = fmt.Sprintf("create failed: %v", err)
+				dsProgress[i].ErrorMsg = fmt.Sprintf("target preflight failed: %v", err)
 				dsProgress[i].Duration = time.Since(dsStart)
 				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
 				sendDatasetProgress(progressChan, "Syncing data to backup disk", currentStage-1, totalStages, state, dsProgress, i)
 				failedDatasets = append(failedDatasets, ds)
+				failedReasons[ds] = dsProgress[i].ErrorMsg
 				output.WriteString(fmt.Sprintf("Warning:Could not create %s: %v\n", syncDest, err))
 				continue
 			}
@@ -516,6 +525,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 				dsProgress[i].Status = DatasetError
 				dsProgress[i].ErrorMsg = syncErr.Error()
 				failedDatasets = append(failedDatasets, ds)
+				failedReasons[ds] = dsProgress[i].ErrorMsg
 				output.WriteString(fmt.Sprintf("Warning:Sync of %s failed: %v\n", ds, syncErr))
 			} else {
 				dsProgress[i].Status = DatasetDone
@@ -614,10 +624,8 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 	// The disk has been exported safely, so report the outcome honestly: a run
 	// that could not replicate every dataset is not a successful run.
 	if len(failedDatasets) > 0 {
-		output.WriteString(fmt.Sprintf(
-			"\nWarning:%d dataset(s) failed to replicate: %s\n",
-			len(failedDatasets), strings.Join(failedDatasets, ", ")))
-		return output.String(), fmt.Errorf("backup incomplete: %s failed to replicate", strings.Join(failedDatasets, ", "))
+		writeReplicationFailures(&output, failedDatasets, failedReasons)
+		return output.String(), replicationFailureError("backup", failedDatasets, failedReasons)
 	}
 
 	output.WriteString("\n[OK]Backup completed successfully!")
@@ -639,6 +647,11 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 	// to move datasets inside themselves.
 	if sourcePool == destPool {
 		return "", fmt.Errorf("source and destination are both %s - a pool cannot be backed up onto itself", sourcePool)
+	}
+	// The destination vetting invariant - see systempool.go. Doubly vital
+	// here: the force flow destroys every snapshot on the destination.
+	if err := vetLocalBackupDestination(ctx, defaultRunner, destPool); err != nil {
+		return "", err
 	}
 
 	output.WriteString(fmt.Sprintf("Force backing up %s → %s\n\n", sourcePool, destPool))
@@ -784,6 +797,7 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 
 	// Datasets whose replication failed, reported at the end of the run.
 	var failedDatasets []string
+	failedReasons := map[string]string{}
 
 	// Stage 4: Force sync the datasets in scope
 	err = executeStage(StageSyncData, "📨 Force syncing to backup disk", func() error {
@@ -819,13 +833,14 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 			dsProgress[i].Status = DatasetSyncing
 			sendDatasetProgress(progressChan, fmt.Sprintf("Force syncing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 
-			if err := ensureDatasetExists(ctx, syncDest); err != nil {
+			if err := preflightSyncTarget(ctx, defaultRunner, syncDest, &output); err != nil {
 				dsProgress[i].Status = DatasetSkipped
-				dsProgress[i].ErrorMsg = fmt.Sprintf("create failed: %v", err)
+				dsProgress[i].ErrorMsg = fmt.Sprintf("target preflight failed: %v", err)
 				dsProgress[i].Duration = time.Since(dsStart)
 				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
 				sendDatasetProgress(progressChan, "Force syncing to backup disk", currentStage-1, totalStages, state, dsProgress, i)
 				failedDatasets = append(failedDatasets, ds)
+				failedReasons[ds] = dsProgress[i].ErrorMsg
 				output.WriteString(fmt.Sprintf("Warning:Could not create %s: %v\n", syncDest, err))
 				continue
 			}
@@ -854,6 +869,7 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 				dsProgress[i].Status = DatasetError
 				dsProgress[i].ErrorMsg = syncErr.Error()
 				failedDatasets = append(failedDatasets, ds)
+				failedReasons[ds] = dsProgress[i].ErrorMsg
 				output.WriteString(fmt.Sprintf("Warning:Force sync of %s failed: %v\n", ds, syncErr))
 			} else {
 				dsProgress[i].Status = DatasetDone
@@ -890,10 +906,8 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 	}
 
 	if len(failedDatasets) > 0 {
-		output.WriteString(fmt.Sprintf(
-			"\nWarning:%d dataset(s) failed to replicate: %s\n",
-			len(failedDatasets), strings.Join(failedDatasets, ", ")))
-		return output.String(), fmt.Errorf("force backup incomplete: %s failed to replicate", strings.Join(failedDatasets, ", "))
+		writeReplicationFailures(&output, failedDatasets, failedReasons)
+		return output.String(), replicationFailureError("force backup", failedDatasets, failedReasons)
 	}
 
 	output.WriteString("\n[OK]Force backup completed successfully!")
@@ -1402,6 +1416,7 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 
 	// Datasets whose replication failed, reported at the end of the run.
 	var failedDatasets []string
+	failedReasons := map[string]string{}
 
 	// Stage 4: Remote sync via syncoid (all datasets)
 	err = executeStage(StageSyncData, "Syncing data from remote host", func() error {
@@ -1466,13 +1481,14 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 			dsProgress[i].Status = DatasetSyncing
 			sendDatasetProgress(progressChan, fmt.Sprintf("Syncing %s", suffix), currentStage-1, totalStages, state, dsProgress, i)
 
-			if err := ensureDatasetExists(ctx, syncDest); err != nil {
+			if err := preflightSyncTarget(ctx, defaultRunner, syncDest, &output); err != nil {
 				dsProgress[i].Status = DatasetSkipped
-				dsProgress[i].ErrorMsg = fmt.Sprintf("create failed: %v", err)
+				dsProgress[i].ErrorMsg = fmt.Sprintf("target preflight failed: %v", err)
 				dsProgress[i].Duration = time.Since(dsStart)
 				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
 				sendDatasetProgress(progressChan, "Syncing data from remote host", currentStage-1, totalStages, state, dsProgress, i)
 				failedDatasets = append(failedDatasets, ds)
+				failedReasons[ds] = dsProgress[i].ErrorMsg
 				output.WriteString(fmt.Sprintf("Warning:Could not create %s: %v\n", syncDest, err))
 				continue
 			}
@@ -1505,6 +1521,7 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 				dsProgress[i].Status = DatasetError
 				dsProgress[i].ErrorMsg = syncErr.Error()
 				failedDatasets = append(failedDatasets, ds)
+				failedReasons[ds] = dsProgress[i].ErrorMsg
 				output.WriteString(fmt.Sprintf("Warning:Sync of %s failed: %v\n", ds, syncErr))
 			} else {
 				dsProgress[i].Status = DatasetDone
@@ -1548,10 +1565,8 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 	}
 
 	if len(failedDatasets) > 0 {
-		output.WriteString(fmt.Sprintf(
-			"\nWarning: %d dataset(s) failed to replicate: %s\n",
-			len(failedDatasets), strings.Join(failedDatasets, ", ")))
-		return output.String(), fmt.Errorf("remote backup incomplete: %s failed to replicate", strings.Join(failedDatasets, ", "))
+		writeReplicationFailures(&output, failedDatasets, failedReasons)
+		return output.String(), replicationFailureError("remote backup", failedDatasets, failedReasons)
 	}
 
 	output.WriteString("\n[OK] Remote backup completed successfully!")
@@ -1675,6 +1690,7 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 
 	// Datasets whose replication failed, reported at the end of the run.
 	var failedDatasets []string
+	failedReasons := map[string]string{}
 
 	// Stage 2: Push the datasets in scope to the remote via syncoid
 	err = executeStage(StageSyncData, "Pushing data to remote host", func() error {
@@ -1704,13 +1720,14 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 			dsProgress[i].Status = DatasetSyncing
 			sendDatasetProgress(progressChan, fmt.Sprintf("Pushing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 
-			if err := ensureRemoteDatasetExists(ctx, remoteHost, remoteDatasetPath); err != nil {
+			if err := preflightRemoteSyncTarget(ctx, remoteHost, remoteDatasetPath); err != nil {
 				dsProgress[i].Status = DatasetSkipped
-				dsProgress[i].ErrorMsg = fmt.Sprintf("create failed: %v", err)
+				dsProgress[i].ErrorMsg = fmt.Sprintf("target preflight failed: %v", err)
 				dsProgress[i].Duration = time.Since(dsStart)
 				setAllSnapshotStatus(dsProgress[i].Snapshots, SnapError)
 				sendDatasetProgress(progressChan, "Pushing data to remote host", currentStage-1, totalStages, state, dsProgress, i)
 				failedDatasets = append(failedDatasets, ds)
+				failedReasons[ds] = dsProgress[i].ErrorMsg
 				output.WriteString(fmt.Sprintf("Warning: could not create %s: %v\n", remoteDatasetPath, err))
 				continue
 			}
@@ -1730,6 +1747,7 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 				dsProgress[i].Status = DatasetError
 				dsProgress[i].ErrorMsg = syncErr.Error()
 				failedDatasets = append(failedDatasets, ds)
+				failedReasons[ds] = dsProgress[i].ErrorMsg
 				output.WriteString(fmt.Sprintf("Warning: push of %s failed: %v\n", ds, syncErr))
 			} else {
 				dsProgress[i].Status = DatasetDone
@@ -1760,10 +1778,8 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 	}
 
 	if len(failedDatasets) > 0 {
-		output.WriteString(fmt.Sprintf(
-			"\nWarning: %d dataset(s) failed to replicate: %s\n",
-			len(failedDatasets), strings.Join(failedDatasets, ", ")))
-		return output.String(), fmt.Errorf("push backup incomplete: %s failed to replicate", strings.Join(failedDatasets, ", "))
+		writeReplicationFailures(&output, failedDatasets, failedReasons)
+		return output.String(), replicationFailureError("push backup", failedDatasets, failedReasons)
 	}
 
 	output.WriteString("\n[OK] Push backup completed successfully!")
@@ -2177,6 +2193,13 @@ func planLayoutMigration(destPool, hostname string, datasets []string, exists fu
 // the flat and the namespaced location, since silently merging would risk
 // data loss. Writes a one-line note to output for every rename performed.
 func migrateLegacyDestinationLayout(ctx context.Context, destPool, hostname string, datasets []string, output *strings.Builder) error {
+	// Belt and braces on top of the caller's vet: renaming datasets on the
+	// pool the system runs from is exactly how NIXROOT/atuin was once dragged
+	// into a backup namespace, so refuse before even planning a rename.
+	if reason := systemPoolReason(ctx, defaultRunner, destPool); reason != "" {
+		return fmt.Errorf("refusing to migrate dataset layout on %s: it holds the running system (%s)", destPool, reason)
+	}
+
 	exists := func(path string) bool {
 		_, err := runCommandOutput("zfs", "list", "-H", path)
 		return err == nil
@@ -2272,12 +2295,94 @@ func ensureDatasetExists(ctx context.Context, dataset string) error {
 	return runCommandWithContext(ctx, "zfs", "create", "-p", dataset)
 }
 
-// ensureRemoteDatasetExists creates a ZFS dataset on a remote host via SSH if it doesn't exist.
-func ensureRemoteDatasetExists(ctx context.Context, sshHost, dataset string) error {
-	if _, err := runCommandOutput("ssh", sshHost, "zfs", "list", "-H", dataset); err == nil {
-		return nil // already exists
+// parentDataset returns the dataset one level up, or "" for a pool root.
+func parentDataset(dataset string) string {
+	idx := strings.LastIndex(dataset, "/")
+	if idx < 0 {
+		return ""
 	}
-	return runCommandWithContext(ctx, "ssh", sshHost, "zfs", "create", "-p", dataset)
+	return dataset[:idx]
+}
+
+// emptyTargetThreshold is the largest `used` value at which a snapshotless,
+// childless target dataset is treated as empty debris. An empty dataset
+// carries up to ~1M of metadata; real received data exceeds this immediately.
+const emptyTargetThreshold = 10 * 1024 * 1024
+
+// preflightSyncTarget prepares a replication target for syncoid.
+//
+// The target leaf must NOT be pre-created: syncoid refuses to replicate into
+// an existing dataset that shares no snapshot with the source ("Target exists
+// but has no snapshots matching with source ... did you mistakenly run zfs
+// create on the target?"). An older version of this tool did exactly that,
+// which made the first backup of every dataset onto a fresh pool fail. So:
+//
+//   - target missing: ensure only the PARENT hierarchy exists (zfs receive
+//     needs it), and let syncoid's initial full send create the leaf;
+//   - target has snapshots, children, or a partial receive to resume: leave
+//     it alone - syncoid knows what to do, and if it refuses, its message
+//     reaches the user through the failure report;
+//   - target is empty debris from a run of the older version (no snapshots,
+//     no children, no resume token, only metadata-sized usage): destroy it so
+//     replication can succeed, noting the repair in the run log.
+func preflightSyncTarget(ctx context.Context, r commandRunner, target string, output *strings.Builder) error {
+	if _, err := r.Output(ctx, "zfs", "list", "-H", target); err != nil {
+		parent := parentDataset(target)
+		if parent == "" {
+			return nil
+		}
+		if _, err := r.Output(ctx, "zfs", "list", "-H", parent); err == nil {
+			return nil
+		}
+		output.WriteString(fmt.Sprintf("Creating parent dataset %s (replication creates %s itself)\n", parent, target))
+		return r.Run(ctx, "zfs", "create", "-p", parent)
+	}
+
+	snaps, err := r.Output(ctx, "zfs", "list", "-H", "-t", "snapshot", "-o", "name", "-d", "1", target)
+	if err != nil || strings.TrimSpace(snaps) != "" {
+		return nil
+	}
+
+	token, err := r.Output(ctx, "zfs", "get", "-H", "-o", "value", "receive_resume_token", target)
+	if err == nil && strings.TrimSpace(token) != "" && strings.TrimSpace(token) != "-" {
+		output.WriteString(fmt.Sprintf("%s holds a resumable partial receive - leaving it for syncoid to resume\n", target))
+		return nil
+	}
+
+	children, err := r.Output(ctx, "zfs", "list", "-H", "-o", "name", "-d", "1", target)
+	if err != nil || len(strings.Split(strings.TrimSpace(children), "\n")) > 1 {
+		return nil
+	}
+
+	used, err := r.Output(ctx, "zfs", "get", "-H", "-p", "-o", "value", "used", target)
+	if err != nil {
+		return nil
+	}
+	usedBytes, err := strconv.ParseInt(strings.TrimSpace(used), 10, 64)
+	if err != nil || usedBytes > emptyTargetThreshold {
+		return nil
+	}
+
+	output.WriteString(fmt.Sprintf("Removing empty pre-created target %s so replication can create it properly\n", target))
+	return r.Run(ctx, "zfs", "destroy", target)
+}
+
+// preflightRemoteSyncTarget is the push-flow counterpart: it only ensures the
+// remote parent hierarchy exists. No remote self-repair - destroying datasets
+// on another machine over SSH is a decision the user makes there, and syncoid
+// explains an unusable remote target well enough for the failure report.
+func preflightRemoteSyncTarget(ctx context.Context, sshHost, target string) error {
+	if _, err := runCommandOutput("ssh", sshHost, "zfs", "list", "-H", target); err == nil {
+		return nil
+	}
+	parent := parentDataset(target)
+	if parent == "" {
+		return nil
+	}
+	if _, err := runCommandOutput("ssh", sshHost, "zfs", "list", "-H", parent); err == nil {
+		return nil
+	}
+	return runCommandWithContext(ctx, "ssh", sshHost, "zfs", "create", "-p", parent)
 }
 
 // syncoidTimeout is the maximum time allowed for a single syncoid dataset sync.
@@ -2595,6 +2700,41 @@ If that hangs or fails, force it out and back in:
 If commands touching %[1]s hang, reboot to clear the suspension.
 Check it is healthy before backing up again:
     zpool status %[1]s`, pool)
+}
+
+// failureLine compresses a dataset's failure reason onto one legible line so
+// the failure screen can show every dataset's "why" without a wall of text.
+func failureLine(reason string) string {
+	line := strings.Join(strings.Fields(reason), " ")
+	const maxLen = 200
+	if len(line) > maxLen {
+		line = line[:maxLen] + "..."
+	}
+	return line
+}
+
+// replicationFailureError builds the error for a run in which some datasets
+// failed to replicate. The failure screen renders only this error - the run
+// log is not shown there - so each dataset carries its reason with it.
+func replicationFailureError(kind string, failed []string, reasons map[string]string) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s incomplete: %d dataset(s) failed to replicate:\n", kind, len(failed))
+	for _, ds := range failed {
+		b.WriteString("\n" + ds)
+		if reason := reasons[ds]; reason != "" {
+			b.WriteString(": " + failureLine(reason))
+		}
+	}
+	return fmt.Errorf("%s", b.String())
+}
+
+// writeReplicationFailures records each failed dataset and its full,
+// untruncated reason in the run log and report.
+func writeReplicationFailures(output *strings.Builder, failed []string, reasons map[string]string) {
+	fmt.Fprintf(output, "\nWarning: %d dataset(s) failed to replicate:\n", len(failed))
+	for _, ds := range failed {
+		fmt.Fprintf(output, "  %s: %s\n", ds, reasons[ds])
+	}
 }
 
 // commandFailure builds the error for a failed command: what ran, what it
