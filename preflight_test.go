@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -165,5 +166,70 @@ func TestParentDataset(t *testing.T) {
 		if got := parentDataset(dataset); got != want {
 			t.Errorf("parentDataset(%q) = %q, want %q", dataset, got, want)
 		}
+	}
+}
+
+func TestReadPasswordLineKeepsInteriorWhitespace(t *testing.T) {
+	got, err := readPasswordLine(strings.NewReader("correct horse battery staple\n"))
+	if err != nil || got != "correct horse battery staple" {
+		t.Errorf("got %q, err %v", got, err)
+	}
+	got, err = readPasswordLine(strings.NewReader("trailing-crlf\r\n"))
+	if err != nil || got != "trailing-crlf" {
+		t.Errorf("got %q, err %v", got, err)
+	}
+	// A final line without a newline (printf '%s' | ...) must still work.
+	got, err = readPasswordLine(strings.NewReader("no-newline"))
+	if err != nil || got != "no-newline" {
+		t.Errorf("got %q, err %v", got, err)
+	}
+}
+
+func TestReadMaskedInputEchoesOneStarPerCharacter(t *testing.T) {
+	var screen bytes.Buffer
+	got, err := readMaskedInput(strings.NewReader("s3cret pass\r"), &screen)
+	if err != nil || got != "s3cret pass" {
+		t.Fatalf("got %q, err %v", got, err)
+	}
+	if screen.String() != "***********" {
+		t.Errorf("screen showed %q, want 11 stars", screen.String())
+	}
+}
+
+func TestReadMaskedInputBackspaceErasesStarAndCharacter(t *testing.T) {
+	var screen bytes.Buffer
+	got, err := readMaskedInput(strings.NewReader("abcd\x7f\r"), &screen)
+	if err != nil || got != "abc" {
+		t.Fatalf("got %q, err %v", got, err)
+	}
+	if screen.String() != "****\b \b" {
+		t.Errorf("screen showed %q, want four stars then an erase", screen.String())
+	}
+}
+
+func TestReadMaskedInputTreatsMultibyteRunesAsOneCharacter(t *testing.T) {
+	var screen bytes.Buffer
+	// é is two bytes; one star out, and one backspace removes it entirely.
+	got, err := readMaskedInput(strings.NewReader("é\x7fa\r"), &screen)
+	if err != nil || got != "a" {
+		t.Fatalf("got %q, err %v", got, err)
+	}
+	if screen.String() != "*\b \b*" {
+		t.Errorf("screen showed %q", screen.String())
+	}
+}
+
+func TestReadMaskedInputCtrlUClearsEverything(t *testing.T) {
+	var screen bytes.Buffer
+	got, err := readMaskedInput(strings.NewReader("wrong\x15right\r"), &screen)
+	if err != nil || got != "right" {
+		t.Fatalf("got %q, err %v", got, err)
+	}
+}
+
+func TestReadMaskedInputCtrlCCancels(t *testing.T) {
+	var screen bytes.Buffer
+	if _, err := readMaskedInput(strings.NewReader("half\x03"), &screen); err == nil {
+		t.Fatal("ctrl+c should cancel password entry")
 	}
 }

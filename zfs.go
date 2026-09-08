@@ -1,17 +1,21 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"golang.org/x/term"
 )
 
 // getLocalHostname returns the local machine's hostname
@@ -224,11 +228,101 @@ func runRemoteBackup(ctx context.Context, password, remoteHost, remoteDataset, d
 }
 
 // Synchronous versions for CLI mode
+// promptPassword reads a passphrase from the terminal, echoing a * per
+// character (like the TUI's password field) so typing gives feedback without
+// the passphrase reaching the screen or scrollback. Whitespace inside the
+// passphrase survives. When stdin is not a terminal (a scripted run piping
+// the passphrase in), it falls back to reading one full line.
+func promptPassword(prompt string) (string, error) {
+	fmt.Print(prompt)
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return readPasswordLine(os.Stdin)
+	}
+
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return "", err
+	}
+	password, readErr := readMaskedInput(os.Stdin, os.Stdout)
+	restoreErr := term.Restore(fd, oldState)
+	fmt.Println()
+	if readErr != nil {
+		return "", readErr
+	}
+	if restoreErr != nil {
+		return "", restoreErr
+	}
+	return password, nil
+}
+
+// readMaskedInput consumes keystrokes from a terminal in raw mode, printing a
+// * per typed character. Backspace erases one character (and its star),
+// ctrl+u clears the whole entry, enter finishes, and ctrl+c or ctrl+d
+// abandons the prompt. Multi-byte UTF-8 input is tracked per rune, so one
+// character is always one star. Split from promptPassword so it can be
+// tested with plain readers and writers.
+func readMaskedInput(r io.Reader, w io.Writer) (string, error) {
+	var password []byte
+	var pending []byte // bytes of a UTF-8 rune still being assembled
+	eraseOne := func() {
+		fmt.Fprint(w, "\b \b")
+	}
+
+	buf := make([]byte, 1)
+	for {
+		n, err := r.Read(buf)
+		if err != nil {
+			return "", err
+		}
+		if n == 0 {
+			continue
+		}
+		c := buf[0]
+		switch {
+		case c == '\r' || c == '\n':
+			return string(password), nil
+		case c == 3 || c == 4: // ctrl+c / ctrl+d
+			return "", fmt.Errorf("password entry cancelled")
+		case c == 21: // ctrl+u - start over
+			for i := 0; i < utf8.RuneCount(password); i++ {
+				eraseOne()
+			}
+			password = password[:0]
+			pending = pending[:0]
+		case c == 127 || c == 8: // backspace / delete
+			if len(password) > 0 {
+				_, size := utf8.DecodeLastRune(password)
+				password = password[:len(password)-size]
+				eraseOne()
+			}
+		case c >= 32: // printable, including UTF-8 continuation bytes
+			pending = append(pending, c)
+			if utf8.FullRune(pending) {
+				password = append(password, pending...)
+				pending = pending[:0]
+				fmt.Fprint(w, "*")
+			}
+		}
+	}
+}
+
+// readPasswordLine reads a single line, keeping interior whitespace and
+// stripping only the trailing newline. Split out so it can be tested.
+func readPasswordLine(r io.Reader) (string, error) {
+	line, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil && line == "" {
+		return "", err
+	}
+	return strings.TrimRight(line, "\r\n"), nil
+}
+
 func runBackupSync() {
-	// Prompt for password
-	fmt.Print("Enter encryption password for NIXBACKUPS: ")
-	var password string
-	fmt.Scanln(&password)
+	password, err := promptPassword("Enter encryption password for NIXBACKUPS: ")
+	if err != nil {
+		fmt.Println(errorStyle.Render("Error:could not read password: " + err.Error()))
+		return
+	}
 
 	ctx := context.Background()
 	msg, err := performBackup(ctx, password, "NIXROOT", "NIXBACKUPS", nil, nil)
@@ -240,10 +334,11 @@ func runBackupSync() {
 }
 
 func runForceBackupSync() {
-	// Prompt for password
-	fmt.Print("Enter encryption password for NIXBACKUPS: ")
-	var password string
-	fmt.Scanln(&password)
+	password, err := promptPassword("Enter encryption password for NIXBACKUPS: ")
+	if err != nil {
+		fmt.Println(errorStyle.Render("Error:could not read password: " + err.Error()))
+		return
+	}
 
 	ctx := context.Background()
 	msg, err := performForceBackup(ctx, password, "NIXROOT", "NIXBACKUPS", nil, nil)
