@@ -252,3 +252,33 @@ func TestSyncoidTimeoutScalesWithDatasetSize(t *testing.T) {
 		t.Errorf("unreadable size should fall back to the floor, got %v", got)
 	}
 }
+
+func TestStreamHeadlessProgressReportsFailuresImmediately(t *testing.T) {
+	updates := make(chan progressUpdate, 4)
+	updates <- progressUpdate{stageNum: 4, totalStages: 7, stage: "Syncing data", datasets: []DatasetProgress{
+		{Name: "abyss", Status: DatasetError, ErrorMsg: "Target exists but has no snapshots matching"},
+		{Name: "home", Status: DatasetSyncing, Size: "120G"},
+	}}
+	updates <- progressUpdate{stageNum: 4, totalStages: 7, stage: "Syncing data", datasets: []DatasetProgress{
+		{Name: "abyss", Status: DatasetError, ErrorMsg: "Target exists but has no snapshots matching"},
+		{Name: "home", Status: DatasetDone},
+	}}
+	close(updates)
+
+	var out bytes.Buffer
+	streamHeadlessProgress(&out, updates)
+	text := out.String()
+
+	if !strings.Contains(text, "[FAIL] abyss: Target exists") {
+		t.Errorf("failure not narrated: %q", text)
+	}
+	if strings.Count(text, "[FAIL] abyss") != 1 {
+		t.Errorf("unchanged status repeated: %q", text)
+	}
+	if !strings.Contains(text, "syncing home") || !strings.Contains(text, "[OK] home") {
+		t.Errorf("dataset lifecycle not narrated: %q", text)
+	}
+	if strings.Count(text, "[4/7] Syncing data") != 1 {
+		t.Errorf("stage header should print once: %q", text)
+	}
+}

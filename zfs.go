@@ -317,15 +317,55 @@ func readPasswordLine(r io.Reader) (string, error) {
 	return strings.TrimRight(line, "\r\n"), nil
 }
 
-func runBackupSync() {
+// streamHeadlessProgress prints stage and per-dataset transitions as they
+// happen, so a headless run narrates itself instead of sitting silent for
+// hours and dumping everything at the end. A dataset's failure is printed
+// the moment it occurs, with its reason - not when the run finishes.
+func streamHeadlessProgress(w io.Writer, updates <-chan progressUpdate) {
+	lastStageNum := 0
+	status := map[string]DatasetSyncStatus{}
+	for u := range updates {
+		if u.stageNum != lastStageNum {
+			fmt.Fprintf(w, "[%d/%d] %s\n", u.stageNum, u.totalStages, u.stage)
+			lastStageNum = u.stageNum
+		}
+		for _, d := range u.datasets {
+			prev, seen := status[d.Name]
+			if seen && prev == d.Status {
+				continue
+			}
+			status[d.Name] = d.Status
+			switch d.Status {
+			case DatasetSyncing:
+				fmt.Fprintf(w, "  syncing %s (%s)...\n", d.Name, d.Size)
+			case DatasetDone:
+				fmt.Fprintf(w, "  [OK] %s (%s)\n", d.Name, d.Duration.Round(time.Second))
+			case DatasetError, DatasetSkipped:
+				fmt.Fprintf(w, "  [FAIL] %s: %s\n", d.Name, failureLine(d.ErrorMsg))
+			}
+		}
+	}
+}
+
+// runHeadless drives a backup function with live progress on stdout.
+func runHeadless(perform func(ctx context.Context, password string, progressChan chan<- progressUpdate) (string, error)) {
 	password, err := promptPassword("Enter encryption password for NIXBACKUPS: ")
 	if err != nil {
 		fmt.Println(errorStyle.Render("Error:could not read password: " + err.Error()))
 		return
 	}
 
-	ctx := context.Background()
-	msg, err := performBackup(ctx, password, "NIXROOT", "NIXBACKUPS", nil, nil)
+	progressChan := make(chan progressUpdate, 16)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		streamHeadlessProgress(os.Stdout, progressChan)
+	}()
+
+	msg, err := perform(context.Background(), password, progressChan)
+	close(progressChan)
+	<-done
+
 	if err != nil {
 		fmt.Println(errorStyle.Render("Error:" + err.Error()))
 		return
@@ -333,20 +373,16 @@ func runBackupSync() {
 	fmt.Println(statusStyle.Render(msg))
 }
 
-func runForceBackupSync() {
-	password, err := promptPassword("Enter encryption password for NIXBACKUPS: ")
-	if err != nil {
-		fmt.Println(errorStyle.Render("Error:could not read password: " + err.Error()))
-		return
-	}
+func runBackupSync() {
+	runHeadless(func(ctx context.Context, password string, progressChan chan<- progressUpdate) (string, error) {
+		return performBackup(ctx, password, "NIXROOT", "NIXBACKUPS", nil, progressChan)
+	})
+}
 
-	ctx := context.Background()
-	msg, err := performForceBackup(ctx, password, "NIXROOT", "NIXBACKUPS", nil, nil)
-	if err != nil {
-		fmt.Println(errorStyle.Render("Error:" + err.Error()))
-		return
-	}
-	fmt.Println(statusStyle.Render(msg))
+func runForceBackupSync() {
+	runHeadless(func(ctx context.Context, password string, progressChan chan<- progressUpdate) (string, error) {
+		return performForceBackup(ctx, password, "NIXROOT", "NIXBACKUPS", nil, progressChan)
+	})
 }
 
 func runUnmountSync() {

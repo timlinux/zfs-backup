@@ -21,6 +21,10 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Headless runs narrate themselves.** `--backup` and `--force-backup` now
+  stream stage transitions, per-dataset progress and failures (with reasons)
+  as they happen, instead of buffering all output until the end - an early
+  failure is visible in its first minute, not hours later.
 - **A large first seed is no longer killed by the clock.** The fixed 4-hour
   per-dataset syncoid timeout - built to stop wedged syncs - cancelled a
   healthy ~300GiB initial replication shortly before it finished. The
