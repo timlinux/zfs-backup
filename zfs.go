@@ -613,7 +613,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 					sendDatasetProgress(progressChan, fmt.Sprintf("Syncing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 				},
 				func() error {
-					return runSyncoidWithTimeout(ctx, syncoidTimeout, syncoidBaseArgs(syncSrc, syncDest)...)
+					return runSyncoidWithTimeout(ctx, syncoidTimeoutFor(ctx, defaultRunner, syncSrc), syncoidBaseArgs(syncSrc, syncDest)...)
 				},
 			)
 			if syncErr != nil {
@@ -957,7 +957,7 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 					sendDatasetProgress(progressChan, fmt.Sprintf("Force syncing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 				},
 				func() error {
-					return runSyncoidWithTimeout(ctx, syncoidTimeout, syncoidBaseArgs(syncSrc, syncDest, "--force-delete")...)
+					return runSyncoidWithTimeout(ctx, syncoidTimeoutFor(ctx, defaultRunner, syncSrc), syncoidBaseArgs(syncSrc, syncDest, "--force-delete")...)
 				},
 			)
 			if syncErr != nil {
@@ -1835,7 +1835,7 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 					sendDatasetProgress(progressChan, fmt.Sprintf("Pushing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 				},
 				func() error {
-					return runSyncoidWithTimeout(ctx, syncoidTimeout, syncoidBaseArgs(syncSrc, remoteDest)...)
+					return runSyncoidWithTimeout(ctx, syncoidTimeoutFor(ctx, defaultRunner, syncSrc), syncoidBaseArgs(syncSrc, remoteDest)...)
 				},
 			)
 			if syncErr != nil {
@@ -2480,9 +2480,37 @@ func preflightRemoteSyncTarget(ctx context.Context, sshHost, target string) erro
 	return runCommandWithContext(ctx, "ssh", sshHost, "zfs", "create", "-p", parent)
 }
 
-// syncoidTimeout is the maximum time allowed for a single syncoid dataset sync.
-// If exceeded, the sync is cancelled and the backup continues with the next dataset.
+// syncoidTimeout is the floor for a single syncoid dataset sync. If exceeded,
+// the sync is cancelled and the backup continues with the next dataset.
 const syncoidTimeout = 4 * time.Hour
+
+// syncoidSeedRate is the pessimistic transfer rate used to size a dataset's
+// sync deadline: slow USB with encryption overhead. Real transfers run
+// faster; the point is that a legitimate full seed never gets killed by the
+// clock, while a genuinely wedged sync still cannot run forever.
+const syncoidSeedRate = 10 * 1024 * 1024 // bytes per second
+
+// syncoidTimeoutFor sizes the per-dataset syncoid deadline from the amount
+// of data the dataset could possibly need to send: its full `used` size at a
+// pessimistic rate, plus an hour of slack, never less than syncoidTimeout.
+// A fixed 4h cap once killed a healthy ~300GiB first seed half an hour
+// before the finish line; a deadline the dataset cannot legitimately exceed
+// keeps the timeout meaning "stuck", not "large".
+func syncoidTimeoutFor(ctx context.Context, r commandRunner, dataset string) time.Duration {
+	out, err := r.Output(ctx, "zfs", "get", "-H", "-p", "-o", "value", "used", dataset)
+	if err != nil {
+		return syncoidTimeout
+	}
+	usedBytes, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil || usedBytes <= 0 {
+		return syncoidTimeout
+	}
+	timeout := time.Duration(usedBytes/syncoidSeedRate)*time.Second + time.Hour
+	if timeout < syncoidTimeout {
+		return syncoidTimeout
+	}
+	return timeout
+}
 
 // runSyncoidWithTimeout runs syncoid with a per-dataset timeout to prevent infinite hangs.
 func runSyncoidWithTimeout(ctx context.Context, timeout time.Duration, args ...string) error {

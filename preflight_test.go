@@ -233,3 +233,22 @@ func TestReadMaskedInputCtrlCCancels(t *testing.T) {
 		t.Fatal("ctrl+c should cancel password entry")
 	}
 }
+
+func TestSyncoidTimeoutScalesWithDatasetSize(t *testing.T) {
+	big := scriptedRunner(func(line string) (string, error) { return "500000000000\n", nil })
+	got := syncoidTimeoutFor(context.Background(), big, "NIXROOT/nix")
+	// 500GB at 10MiB/s is over 13h; well above the 4h floor.
+	if got <= syncoidTimeout {
+		t.Errorf("500GB dataset got only the %v floor", got)
+	}
+
+	small := scriptedRunner(func(line string) (string, error) { return "1048576\n", nil })
+	if got := syncoidTimeoutFor(context.Background(), small, "NIXROOT/root"); got != syncoidTimeout {
+		t.Errorf("small dataset should get the floor, got %v", got)
+	}
+
+	broken := scriptedRunner(func(line string) (string, error) { return "", listingError{} })
+	if got := syncoidTimeoutFor(context.Background(), broken, "NIXROOT/root"); got != syncoidTimeout {
+		t.Errorf("unreadable size should fall back to the floor, got %v", got)
+	}
+}
