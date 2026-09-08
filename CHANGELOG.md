@@ -9,6 +9,24 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-09-08
+
+### Security
+
+- **The headless passphrase prompt no longer echoes.** `--backup` and
+  `--force-backup` read the passphrase with a star per character (matching
+  the TUI's password field), with backspace, ctrl+u to clear and
+  ctrl+c/ctrl+d to abandon. Passphrases containing spaces now survive, and
+  piped stdin still works for scripted runs.
+
+### Fixed
+
+- **A large first seed is no longer killed by the clock.** The fixed 4-hour
+  per-dataset syncoid timeout - built to stop wedged syncs - cancelled a
+  healthy ~300GiB initial replication shortly before it finished. The
+  deadline now scales with the dataset's full size at a pessimistic USB
+  rate (never below the 4h floor), so only genuinely stuck syncs die.
+
 ## [2.1.1] - 2026-09-06
 
 ### Security
