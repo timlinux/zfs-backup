@@ -101,6 +101,13 @@ var menuSections = []menuSection{
 				safety:      menuReadOnly,
 			},
 			{
+				title:       "Browse Backup Snapshots",
+				description: "Walk the backup pool's snapshots, flagged against the source",
+				detail:      "Lists every dataset and snapshot on the backup pool and judges each one against the source pool: still synced, the incremental base, retained history, or orphaned - a snapshot whose source dataset is gone or no longer replicated, which nothing will ever prune.\n\nBrowsing is completely read-only. Orphaned candidates can be destroyed from inside the browser, behind a full dry run and a typed confirmation.",
+				guard:       "dry run first, then typed DESTROY",
+				safety:      menuDestructive,
+			},
+			{
 				title:       "Clean Up Orphaned Snapshots",
 				description: "Reclaim space from snapshots older versions left behind",
 				detail:      "Destroys the orphaned snapshots the health check finds, after showing a full dry run.\n\nNever touches datasets in your backup scope, snapshots with holds or clones, @blank, or anything that is not zfs-backup's own naming pattern.",

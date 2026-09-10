@@ -13,6 +13,7 @@ A beautiful TUI (Terminal User Interface) for managing ZFS backups, built with [
 - **Incremental Backups** - Efficient snapshots of your chosen datasets with syncoid integration
 - **Backup Scope** - Pick exactly which datasets are backed up; everything else is never touched
 - **Health Check** - `doctor` finds orphaned snapshots and quota pressure before it bites
+- **Backup Snapshot Browser** - Walk the backup pool with every snapshot judged against the source; jump straight to orphaned deletion candidates
 - **Multi-Host Backups** - Back up multiple machines to the same drive with hostname namespacing
 - **Pull Backup From Remote** - Pull ZFS snapshots from remote servers via SSH
 - **Push Backup to Remote** - Push local snapshots to a remote backup server via SSH
@@ -196,6 +197,7 @@ than half its quota.
 | Restore Files | Browse snapshots and restore individual files |
 | Backup Scope | Choose which datasets are backed up - anything else is never touched |
 | Backup Health Check | Find orphaned snapshots and datasets whose quota is filling with snapshots |
+| Browse Backup Snapshots | Walk the backup pool's snapshots judged against the source; clean up orphaned candidates |
 | Pool Information | View pool structure, health, datasets, and snapshots |
 | Pool Maintenance | Start/stop scrubs, monitor pool health |
 | Recover Failed Backup | Fix broken sync state after interruption |

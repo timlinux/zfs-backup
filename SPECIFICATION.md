@@ -53,6 +53,8 @@ graph TB
 | datasets.go | Backup scope: the canonical dataset list every phase runs over |
 | snapshots.go | Snapshot naming, creation, pruning and bookmark conversion |
 | doctor.go | Orphan detection, health report, and the shared cleanup plan / destroy API |
+| browse.go | Backup pool browser: destination-to-source mapping and snapshot classification |
+| browse_tui.go | Backup snapshot browser screen: two-pane walk, orphan jump, guarded cleanup |
 | runner.go | Command-execution seam so ZFS logic is testable without a pool |
 | scope_tui.go | Backup scope editor and health check screens |
 | cleanup_tui.go | Orphan cleanup screen: dry run, typed confirmation, outcome |
@@ -316,6 +318,50 @@ stateDiagram-v2
 - The summary explains that space is only reclaimed once every snapshot pinning
   a block is gone, so usage may barely move until the last few are destroyed.
 
+### US-021: Backup Snapshot Browser
+
+**As a** user whose backup pool has accumulated snapshots for datasets that no
+longer exist or are no longer replicated
+**I want** to browse everything on the backup pool with each snapshot judged
+against the source pool
+**So that** I can find and safely remove the snapshots that nothing will ever
+prune, without endangering the replication chain
+
+**Acceptance Criteria:**
+- A "Browse Backup Snapshots" main-menu item (Health section) lists every
+  dataset on the backup pool - including snapshot-less ones - in a two-pane
+  browser: datasets on the left with orphan counts, the selected dataset's
+  snapshots (newest first) on the right.
+- Every snapshot carries one of these verdicts, with a plain-language reason
+  shown for the highlighted snapshot:
+  - **base** - the newest tag shared with the source (snapshot or bookmark);
+    the incremental base for the next backup. Never a deletion candidate.
+  - **synced** - an older tag also present on the source.
+  - **retained** - pruned on the source, kept by backup retention. Normal.
+  - **ORPHAN** - orphaned from the source: the source dataset no longer
+    exists, or is no longer in the backup scope, or it is a syncoid
+    sync-snapshot older than 24 hours with no source counterpart. These are
+    the deletion candidates.
+  - **recent** - a syncoid sync-snapshot young enough to belong to a running
+    send. Left alone.
+  - **protected** - e.g. `@blank`. Never touched.
+  - **foreign** - not zfs-backup's naming pattern. Never touched.
+  - **remote** - lives under another host's namespace; judged only on that
+    host, never from here.
+- Destination datasets are mapped back to their source through the
+  hostname-namespaced layout (`DESTPOOL/<hostname>/x`) and the legacy flat
+  layout (`DESTPOOL/x`).
+- Source tags are gathered from snapshots **and bookmarks**, so a source that
+  pruned to a bookmark still anchors the base.
+- `o` jumps to the next orphan candidate, wrapping around the whole pool.
+- Browsing is strictly read-only. Destroying candidates (`c`) re-vets each
+  one live (holds, clones, protected tags), shows a `zfs destroy -nv` dry
+  run, requires a typed `DESTROY`, destroys one snapshot at a time, and
+  keeps the datasets and their current contents.
+- If the backup scope cannot be read, the out-of-scope verdict is suppressed
+  (degraded to retained) rather than guessed - the browser must never call
+  something a candidate on incomplete information.
+
 ### US-013: All-Dataset Backup
 **As a** system administrator
 **I want to** back up ALL datasets in my source pool (not just home)
@@ -451,8 +497,9 @@ The main menu is organised into named sections, in workflow order:
 
 - **Back Up**: Back Up Now, Push Backup to Remote, Pull Backup From Remote
 - **Restore**: Restore Files, Browse Backup Reports
-- **Health**: Backup Health Check, Clean Up Orphaned Snapshots, Recover
-  Failed Backup, Fix a Pool That Stopped Responding
+- **Health**: Backup Health Check, Browse Backup Snapshots, Clean Up
+  Orphaned Snapshots, Recover Failed Backup, Fix a Pool That Stopped
+  Responding
 - **Pools**: Backup Scope, Pool Information, Pool Maintenance, Manage
   Datasets, Unmount Backup Disk
 - **Danger Zone**: Prepare Backup Device, Force Full Backup

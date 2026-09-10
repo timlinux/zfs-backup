@@ -158,6 +158,49 @@ If it cannot prove a snapshot is safe to destroy, it skips it and says why.
     may barely move until the last snapshot pinning a block is gone. Do not
     stop half way and conclude it did not work.
 
+## Browsing the backup pool
+
+The health check and cleanup look at the *source* pool. **Browse Backup
+Snapshots** (Health section of the menu) looks at the other side: it walks
+every dataset and snapshot on the backup pool and judges each one against the
+source, so you can see at a glance which backup history is healthy and which
+is debris nothing will ever prune.
+
+Pick the source pool, then the backup pool to browse. The left pane lists the
+backup pool's datasets with a red count beside any that carry deletion
+candidates; the right pane shows the selected dataset's snapshots, newest
+first, each with a verdict:
+
+| Verdict | Meaning |
+|---|---|
+| `base` | The newest snapshot shared with the source — the incremental base for the next backup. Never a candidate: destroying it would force a full re-send. |
+| `synced` | An older snapshot the source also still has (as a snapshot or bookmark). |
+| `retained` | The source has pruned its copy; the backup keeps it by design. |
+| `ORPHAN` | Orphaned from the source: its dataset is gone, or no longer in the backup scope, or it is a stale syncoid sync-snapshot. Nothing will ever prune it — this is a deletion candidate. |
+| `recent` | A syncoid sync-snapshot young enough to belong to a send still in flight. |
+| `protected` | Never touched (for example `@blank`). |
+| `foreign` | Not created by zfs-backup. Shown for completeness, never touched. |
+| `remote` | Lives under another host's namespace — judge it on that machine. |
+
+The highlighted snapshot's verdict is explained in a sentence below the panes.
+Press `o` to jump straight to the next candidate, wrapping around the whole
+pool. Browsing is completely read-only.
+
+Press `c` to clean up the candidates. Every candidate is re-vetted live
+against the same rules as the orphan cleanup — holds, clones and protected
+tags are checked again at that moment — then you see a full `zfs destroy -nv`
+dry run and must type `DESTROY` to proceed. Snapshots are destroyed one at a
+time, never with a range expression, and the datasets themselves with their
+current contents are always kept.
+
+!!! note "If the backup scope cannot be read"
+
+    The browser degrades safely: without a readable scope it cannot know
+    whether a source dataset is still meant to be replicated, so those
+    snapshots are shown as `retained` rather than guessed to be orphans.
+    Only certainties — a missing source dataset, stale syncoid debris — are
+    offered as candidates.
+
 ## When a dataset fails to replicate
 
 If a send fails, zfs-backup destroys the snapshot it created for that dataset in

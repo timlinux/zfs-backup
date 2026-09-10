@@ -373,6 +373,8 @@ func (m model) getStatusText() string {
 		return "Backup Scope"
 	case stateDoctor:
 		return "Backup Health"
+	case stateBrowse:
+		return "Backup Browser"
 	case stateCleanup:
 		return "Cleanup"
 	case stateRecoverPool:
@@ -429,6 +431,8 @@ func (m model) getHotkeys() string {
 		return "scroll up/down • c clean up • r refresh • esc return"
 	case stateCleanup:
 		return m.cleanupHotkeys()
+	case stateBrowse:
+		return m.browseHotkeys()
 	case stateRecoverPool:
 		return m.recoverHotkeys()
 	case stateDevicePick:
@@ -537,6 +541,26 @@ type model struct {
 	doctorViewport viewport.Model // Scrollable viewport for the report
 	doctorReady    bool           // Is the report ready?
 	doctorProblems int            // Number of issue groups found
+	// Backup snapshot browser - destination judged against the source
+	browseSrcPool         string           // Source pool the verdicts are formed against
+	browseDestPool        string           // Backup pool being browsed
+	browseData            *backupBrowse    // Classified scan of the backup pool
+	browseErr             error            // Scan failure, shown in place of the panes
+	browseReady           bool             // Is the scan ready?
+	browsePhase           browsePhase      // List, confirm, running or done
+	browseDatasetIdx      int              // Cursor in the dataset pane
+	browseSnapIdx         int              // Cursor in the snapshot pane
+	browseFocusSnaps      bool             // Which pane has the cursor
+	browseMessage         string           // Inline validation / abort message
+	browseMessagePositive bool             // Good news renders green, not amber
+	browsePlan            *destCleanupPlan // Vetted candidates, built on demand
+	browseViewport        viewport.Model   // Scrollable confirm / result body
+	browseViewBody        string           // Viewport body, kept for window resizes
+	browseOutcome         cleanupOutcome   // What the destroy run actually did
+	browseDestroyTotal    int              // Snapshots the destroy run will touch
+	browseDestroyDone     int              // Snapshots destroyed so far
+	browseDestroyProgress chan struct{}    // Ticks from the destroy loop
+	passwordMessage       string           // Why the password screen is back (e.g. wrong passphrase)
 	// Orphan cleanup
 	cleanupPool     string         // Pool being cleaned
 	cleanupPlan     *cleanupPlan   // Vetted dry run - what would be destroyed
@@ -1108,6 +1132,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.zpoolViewport.Width = viewportWidth
 			m.zpoolViewport.Height = viewportHeight
 		}
+		// Rebuild the browser's confirm / result viewport so the danger
+		// banner and input stay positioned for the new geometry.
+		if m.state == stateBrowse && m.browseViewBody != "" {
+			switch m.browsePhase {
+			case browsePhaseConfirm:
+				m.browseViewport = newShorterViewport(msg.Width, msg.Height, 4, m.browseViewBody)
+			case browsePhaseDone:
+				m.browseViewport = newShorterViewport(msg.Width, msg.Height, 2, m.browseViewBody)
+			}
+		}
 		// Update viewport size if viewing a report
 		if m.state == stateReports && m.reportViewing {
 			viewportHeight := msg.Height - 12
@@ -1302,6 +1336,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.doctorPool = selectedPool
 						case "cleanup":
 							m.cleanupPool = selectedPool
+						case "browse":
+							m.browseSrcPool = m.sourcePool
+							m.browseDestPool = selectedPool
 						}
 
 						// Deleting backup history needs more than the y that got us
@@ -1524,6 +1561,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.operation = "scope"
 					m.startPoolSelection(true)
 					return m, nil
+				case "Browse Backup Snapshots":
+					// Judging the backup needs both sides: the source the
+					// verdicts are formed against, then the pool to browse.
+					m.operation = "browse"
+					m.startPoolSelection(true)
+					return m, nil
 				case "Clean Up Orphaned Snapshots":
 					m.operation = "cleanup"
 					m.startPoolSelection(true)
@@ -1635,6 +1678,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if m.passwordInput.Value() != "" {
 					m.password = m.passwordInput.Value()
+					m.passwordMessage = ""
 					// Handle zpoolinfo, maintenance, and quotas specially
 					if m.operation == "zpoolinfo" {
 						return m, m.unlockAndLoadZpoolInfo()
@@ -1646,11 +1690,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Unlock then load quotas
 						return m, m.unlockAndLoadQuotas()
 					}
+					if m.operation == "browse" {
+						unlock := m.unlockAndLoadBrowse()
+						m.password = ""
+						m.passwordInput.SetValue("")
+						m.state = stateBrowse
+						m.browseReady = false
+						m.browsePhase = browsePhaseList
+						return m, tea.Batch(m.spinner.Tick, unlock)
+					}
 					return m.startOperation()
 				}
 			case "esc":
 				m.password = ""
 				m.passwordInput.SetValue("")
+				m.passwordMessage = ""
 				if m.operation == "prepare" {
 					if candidate, found := findCandidate(m.deviceCandidates, m.devicePath); found {
 						m = m.startTypedConfirm(
@@ -1734,6 +1788,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else if m.state == stateScope {
 			return m.updateScopeScreen(msg)
+		} else if m.state == stateBrowse {
+			return m.updateBrowseScreen(msg)
 		} else if m.state == stateDoctor {
 			return m.updateDoctorScreen(msg)
 		} else if m.state == stateCleanup {
@@ -2062,6 +2118,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cleanupPhase = cleanupPhasePlan
 			m.cleanupMessage = ""
 			return m, tea.Batch(m.spinner.Tick, loadCleanupPlan(m.cleanupPool))
+		case "browse":
+			m.state = stateBrowse
+			m.browseReady = false
+			m.browsePhase = browsePhaseList
+			m.browseMessage = ""
+			m.browseDatasetIdx = 0
+			m.browseSnapIdx = 0
+			m.browseFocusSnaps = false
+			return m, tea.Batch(m.spinner.Tick, loadBrowseData(m.browseSrcPool, m.browseDestPool))
 		case "maintenance":
 			return m, m.loadMaintenanceStatus()
 		case "backup", "force-backup", "recover", "remote-backup", "push-backup":
@@ -2102,6 +2167,68 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.scopeMessage = "Saved. Datasets outside the scope will not be snapshotted again."
+		return m, nil
+
+	case browseLoadedMsg:
+		// A wrong passphrase is fixed at the passphrase prompt, not at the
+		// browser's retry key - r rescans without a password and could never
+		// recover from it.
+		if msg.unlockFailed {
+			m.state = statePassword
+			m.passwordMessage = fmt.Sprintf(
+				"That passphrase did not unlock %s. Try again, or press esc to return to the menu.",
+				m.browseDestPool)
+			m.passwordInput.SetValue("")
+			m.passwordInput.Focus()
+			return m, textinput.Blink
+		}
+		m.browseErr = msg.err
+		if msg.err == nil {
+			m.browseData = msg.browse
+			if m.browseDatasetIdx >= len(msg.browse.Datasets) {
+				m.browseDatasetIdx = 0
+			}
+			m.browseSnapIdx = 0
+			m.browseFocusSnaps = false
+		}
+		m.browseReady = true
+		return m, nil
+
+	case browsePlanMsg:
+		// The user may have escaped back to the list while vetting ran; a
+		// stale plan must not resurrect the confirm phase.
+		if m.state != stateBrowse || m.browsePhase != browsePhaseConfirm {
+			return m, nil
+		}
+		m.browsePlan = msg.plan
+		m.browseViewBody = buildBrowseConfirmBody(msg.plan, msg.preview)
+		m.browseViewport = newShorterViewport(m.width, m.height, 4, m.browseViewBody)
+		m.input.SetValue("")
+		m.input.Placeholder = ""
+		// With nothing cleared to destroy there is nothing to confirm, so
+		// no live cursor inviting the user to type DESTROY at a wall.
+		if len(msg.plan.Targets) > 0 {
+			m.input.Focus()
+			return m, textinput.Blink
+		}
+		m.input.Blur()
+		return m, nil
+
+	case browseDestroyProgressMsg:
+		m.browseDestroyDone++
+		if m.browseDestroyProgress == nil {
+			return m, nil
+		}
+		return m, listenBrowseDestroyProgress(m.browseDestroyProgress)
+
+	case browseCleanupDoneMsg:
+		m.browseOutcome = msg.outcome
+		m.browsePhase = browsePhaseDone
+		m.browseDestroyProgress = nil
+		m.browseViewBody = buildBrowseResultBody(msg.outcome)
+		// Shrink-to-content: two destroyed snapshots should not sit inside
+		// a 27-row empty box.
+		m.browseViewport = newShorterViewport(m.width, m.height, 2, m.browseViewBody)
 		return m, nil
 
 	case doctorLoadedMsg:
@@ -2504,6 +2631,8 @@ func (m model) renderContentNopad(width int) string {
 		content.WriteString(m.renderDoctorContent(width))
 	case stateCleanup:
 		content.WriteString(m.renderCleanupContent(width))
+	case stateBrowse:
+		content.WriteString(m.renderBrowseContent(width))
 	case stateRecoverPool:
 		content.WriteString(m.renderRecoverPoolContent(width))
 	case stateDevicePick:
@@ -2806,6 +2935,14 @@ func (m model) renderPasswordContent(width int) string {
 		Align(lipgloss.Center).
 		Render(m.passwordInput.View())
 	b.WriteString(passBox + "\n\n")
+
+	// Why the prompt is back, when it is back: e.g. a rejected passphrase.
+	if m.passwordMessage != "" {
+		b.WriteString(lipgloss.NewStyle().
+			Width(width).
+			Align(lipgloss.Center).
+			Render(warningStyle.Render(m.passwordMessage)) + "\n\n")
+	}
 
 	hint := lipgloss.NewStyle().
 		Width(width).
@@ -3422,6 +3559,14 @@ func helpText() string {
      Read-only. Finds snapshots left behind by older versions and
      datasets whose quota is being eaten by snapshots. Press c on
      that screen to go straight to the cleanup.
+
+  Browse Backup Snapshots
+     Walks every dataset and snapshot on the backup pool and judges
+     each against the source: synced, the incremental base, retained
+     history, or orphaned - candidates nothing will ever prune.
+     Press o to jump straight to the next candidate. Browsing is
+     read-only; destroying candidates is behind a dry run and a
+     typed DESTROY, and never touches the incremental base.
 
   Clean Up Orphaned Snapshots
      Reclaims that space. Always shows a dry run first and asks you

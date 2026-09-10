@@ -28,6 +28,19 @@ Quick reference for all keyboard shortcuts in Kartoza ZFS Backup Tool.
 | ++n++ | No / Cancel |
 | ++escape++ | Cancel and go back |
 
+## Backup Snapshot Browser
+
+| Key | Action |
+|-----|--------|
+| ++arrow-up++ / ++k++, ++arrow-down++ / ++j++ | Move within the focused pane |
+| ++page-up++ / ++page-down++ | Page through long lists |
+| ++home++ / ++g++, ++end++ / ++"G"++ | Jump to the top / bottom of the list |
+| ++enter++ / ++tab++ | Switch between the dataset and snapshot panes |
+| ++o++ | Jump to the next deletion candidate, wrapping around |
+| ++c++ | Clean up the candidates (dry run, then typed ++"DESTROY"++) |
+| ++r++ | Rescan both pools |
+| ++escape++ | Back to the dataset pane, then to the menu |
+
 ## Pool Recovery
 
 Reached from the menu, or with ++f++ when an operation fails because a pool

@@ -9,6 +9,26 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-09-10
+
+### Added
+
+- **Browse Backup Snapshots.** A new Health menu screen walks every dataset
+  and snapshot on the backup pool and judges each one against the source
+  pool: still **synced**, the **incremental base** for the next backup,
+  **retained** history the source has pruned, **orphaned** from the source
+  (its dataset is gone or no longer in the backup scope, so nothing will
+  ever prune it), stale **syncoid debris**, or **foreign** snapshots that
+  are shown but never touched. Datasets pulled from other hosts are listed
+  but never judged from this machine. Press `o` to jump straight to the
+  next deletion candidate; press `c` to destroy the candidates behind the
+  same safeguards as the orphan cleanup - live re-vetting of holds, clones
+  and protected tags, a full `zfs destroy -nv` dry run, a typed `DESTROY`
+  confirmation, and one destroy per snapshot, never a range. The
+  incremental base is structurally excluded from candidacy, so the browser
+  can never break the replication chain. When the backup scope cannot be
+  read, out-of-scope verdicts are suppressed rather than guessed.
+
 ## [2.1.2] - 2026-09-08
 
 ### Security
