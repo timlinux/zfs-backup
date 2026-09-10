@@ -21,6 +21,10 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A run no longer waits forever on a suspended pool.** Waiting for a
+  pre-existing receive now aborts with reconnect instructions the moment
+  the pool reports suspended I/O, instead of polling a process that cannot
+  exit until the drive returns.
 - **Headless runs narrate themselves.** `--backup` and `--force-backup` now
   stream stage transitions, per-dataset progress and failures (with reasons)
   as they happen, instead of buffering all output until the end - an early

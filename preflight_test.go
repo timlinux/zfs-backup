@@ -282,3 +282,33 @@ func TestStreamHeadlessProgressReportsFailuresImmediately(t *testing.T) {
 		t.Errorf("stage header should print once: %q", text)
 	}
 }
+
+func TestSuspendedPoolWaitErrorFiresOnlyForSuspendedPools(t *testing.T) {
+	useFakeProcRoot(t, map[string]string{"NIXBACKUPS": "SUSPENDED", "NIXROOT": "ONLINE"})
+
+	err := suspendedPoolWaitError("NIXBACKUPS/abyss/home")
+	if err == nil {
+		t.Fatal("suspended pool should abort the wait")
+	}
+	for _, want := range []string{"NIXBACKUPS", "zpool clear"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q: %v", want, err)
+		}
+	}
+
+	if err := suspendedPoolWaitError("NIXROOT/home"); err != nil {
+		t.Errorf("healthy pool should not abort the wait: %v", err)
+	}
+	if err := suspendedPoolWaitError("UNKNOWN/ds"); err != nil {
+		t.Errorf("unknown pool (no procfs entry) should not abort: %v", err)
+	}
+}
+
+func TestDatasetPool(t *testing.T) {
+	if got := datasetPool("NIXBACKUPS/abyss/home"); got != "NIXBACKUPS" {
+		t.Errorf("got %q", got)
+	}
+	if got := datasetPool("NIXROOT"); got != "NIXROOT" {
+		t.Errorf("got %q", got)
+	}
+}

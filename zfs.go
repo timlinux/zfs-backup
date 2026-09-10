@@ -2560,6 +2560,24 @@ func runSyncoidWithTimeout(ctx context.Context, timeout time.Duration, args ...s
 	return err
 }
 
+// datasetPool returns the pool a dataset belongs to: its first path segment.
+func datasetPool(dataset string) string {
+	pool, _, _ := strings.Cut(dataset, "/")
+	return pool
+}
+
+// suspendedPoolWaitError reports, via procfs (never pool I/O), whether the
+// dataset's pool has suspended I/O - the one condition under which waiting
+// for an existing receive can never succeed: the wedged process cannot exit
+// until the pool resumes, so polling it is an infinite loop.
+func suspendedPoolWaitError(dataset string) error {
+	pool := datasetPool(dataset)
+	if state, ok := poolStateFromProc(pool); ok && strings.EqualFold(state, "SUSPENDED") {
+		return fmt.Errorf("pool %s has suspended I/O - the receive on %s cannot finish until the drive returns. Reconnect it, then run: zpool clear %s", pool, dataset, pool)
+	}
+	return nil
+}
+
 // waitForZFSReceive waits for an existing zfs receive process to complete
 func waitForZFSReceive(ctx context.Context, dataset string, output *strings.Builder) error {
 	running, pid, err := isZFSReceiveRunning(dataset)
@@ -2569,6 +2587,10 @@ func waitForZFSReceive(ctx context.Context, dataset string, output *strings.Buil
 
 	if !running {
 		return nil
+	}
+
+	if err := suspendedPoolWaitError(dataset); err != nil {
+		return err
 	}
 
 	output.WriteString(fmt.Sprintf("⏳ Found existing zfs receive process (PID %d) for %s\n", pid, dataset))
@@ -2583,6 +2605,9 @@ func waitForZFSReceive(ctx context.Context, dataset string, output *strings.Buil
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
+			if err := suspendedPoolWaitError(dataset); err != nil {
+				return err
+			}
 			running, _, err := isZFSReceiveRunning(dataset)
 			if err != nil {
 				return err
