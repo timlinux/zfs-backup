@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -109,9 +108,7 @@ func loadBrowseDataSync(sourcePool, destPool string) tea.Msg {
 func (m model) unlockAndLoadBrowse() tea.Cmd {
 	sourcePool, destPool, password := m.browseSrcPool, m.browseDestPool, m.password
 	return func() tea.Msg {
-		cmd := exec.Command("zfs", "load-key", destPool)
-		cmd.Stdin = strings.NewReader(password + "\n")
-		if err := cmd.Run(); err != nil {
+		if err := loadPoolKey(destPool, password); err != nil {
 			return browseLoadedMsg{
 				err:          fmt.Errorf("the passphrase did not unlock %s", destPool),
 				unlockFailed: true,

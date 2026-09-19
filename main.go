@@ -360,7 +360,7 @@ func (m model) getStatusText() string {
 	case statePassword:
 		return "Enter Password"
 	case stateRunning:
-		return "Running: " + m.operation
+		return "Running: " + operationDisplayName(m.operation)
 	case stateResult:
 		return "Complete"
 	case stateHelp:
@@ -562,14 +562,17 @@ type model struct {
 	browseDestroyProgress chan struct{}    // Ticks from the destroy loop
 	passwordMessage       string           // Why the password screen is back (e.g. wrong passphrase)
 	// Orphan cleanup
-	cleanupPool     string         // Pool being cleaned
-	cleanupPlan     *cleanupPlan   // Vetted dry run - what would be destroyed
-	cleanupViewport viewport.Model // Scrollable plan / result body
-	cleanupReady    bool           // Is the plan ready?
-	cleanupPhase    cleanupPhase   // Plan, confirm, running or done
-	cleanupOutcome  cleanupOutcome // What the destroy run actually did
-	cleanupMessage  string         // Inline validation / abort message
-	cleanupPlanBody string         // Rendered dry-run body, restored after esc from confirm
+	cleanupPool            string         // Pool being cleaned
+	cleanupPlan            *cleanupPlan   // Vetted dry run - what would be destroyed
+	cleanupViewport        viewport.Model // Scrollable plan / result body
+	cleanupReady           bool           // Is the plan ready?
+	cleanupPhase           cleanupPhase   // Plan, confirm, running or done
+	cleanupOutcome         cleanupOutcome // What the destroy run actually did
+	cleanupMessage         string         // Inline validation / abort message
+	cleanupPlanBody        string         // Rendered dry-run body, restored after esc from confirm
+	cleanupDestroyTotal    int            // Snapshots the destroy run will touch
+	cleanupDestroyDone     int            // Snapshots destroyed so far
+	cleanupDestroyProgress chan struct{}  // Ticks from the destroy loop
 	// Guided pool recovery
 	recoverPool     string         // Pool being recovered
 	recoverHealth   poolHealth     // Latest diagnosis
@@ -1679,18 +1682,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.passwordInput.Value() != "" {
 					m.password = m.passwordInput.Value()
 					m.passwordMessage = ""
-					// Handle zpoolinfo, maintenance, and quotas specially
-					if m.operation == "zpoolinfo" {
+					// Operations that read pool contents directly (rather
+					// than through the backup pipeline) need their own
+					// unlock-then-continue step here. Falling through to
+					// startOperation() for one of these - as "cleanup" and
+					// "doctor" and "scope" used to - left the screen spinning
+					// on "Initializing..." forever, because startOperation()
+					// has no case for them and never starts any real work.
+					switch m.operation {
+					case "zpoolinfo":
 						return m, m.unlockAndLoadZpoolInfo()
-					}
-					if m.operation == "maintenance" {
+					case "maintenance":
 						return m, m.unlockAndLoadMaintenance()
-					}
-					if m.operation == "quotas" {
-						// Unlock then load quotas
+					case "quotas":
 						return m, m.unlockAndLoadQuotas()
-					}
-					if m.operation == "browse" {
+					case "cleanup":
+						return m, m.unlockAndLoadCleanupPlan()
+					case "doctor":
+						return m, m.unlockAndLoadDoctorReport()
+					case "scope":
+						return m, m.unlockAndLoadScope()
+					case "browse":
 						unlock := m.unlockAndLoadBrowse()
 						m.password = ""
 						m.passwordInput.SetValue("")
@@ -2294,9 +2306,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case remedyDoneMsg:
 		return m.afterRemedy(msg.result), nil
 
+	case cleanupDestroyProgressMsg:
+		m.cleanupDestroyDone++
+		if m.cleanupDestroyProgress == nil {
+			return m, nil
+		}
+		return m, listenCleanupDestroyProgress(m.cleanupDestroyProgress)
+
 	case cleanupDoneMsg:
 		m.cleanupOutcome = msg.outcome
 		m.cleanupPhase = cleanupPhaseDone
+		m.cleanupDestroyProgress = nil
 		m.cleanupViewport = newReportViewport(m.width, m.height,
 			buildCleanupResultView(m.cleanupPool, msg.outcome, msg.usage))
 		m.cleanupReady = true
@@ -2960,7 +2980,7 @@ func (m model) renderRunningContent(width int) string {
 	contentTitle := lipgloss.NewStyle().
 		Width(width).
 		Align(lipgloss.Center).
-		Render(selectedItemStyle.Render("Backup in Progress"))
+		Render(selectedItemStyle.Render(operationDisplayName(m.operation) + " in Progress"))
 	b.WriteString(contentTitle + "\n\n")
 
 	// Current stage with spinner
@@ -2968,7 +2988,7 @@ func (m model) renderRunningContent(width int) string {
 	if m.currentStage != "" {
 		stageText = m.spinner.View() + " " + m.currentStage
 	} else {
-		stageText = m.spinner.View() + " " + m.operation
+		stageText = m.spinner.View() + " " + operationDisplayName(m.operation)
 	}
 	stageLine := lipgloss.NewStyle().
 		Width(width).
@@ -3698,10 +3718,7 @@ func (m model) unlockAndLoadZpoolInfo() tea.Cmd {
 	pool := m.zpoolInfoPool
 	password := m.password
 	return func() tea.Msg {
-		// Try to unlock the pool
-		cmd := exec.Command("zfs", "load-key", pool)
-		cmd.Stdin = strings.NewReader(password + "\n")
-		if err := cmd.Run(); err != nil {
+		if err := loadPoolKey(pool, password); err != nil {
 			return zpoolInfoLoadedMsg{err: fmt.Errorf("failed to unlock pool: %w", err)}
 		}
 
@@ -3795,7 +3812,10 @@ func (m model) renderZpoolInfoContent(width int) string {
 	return b.String()
 }
 
-// preparePoolAccess imports pool if needed and checks if unlock is required
+// preparePoolAccess imports pool if needed and checks if unlock is required.
+// Import goes through defaultRunner, not a bare exec.Command, so a pool that
+// is missing or unresponsive fails after actionTimeout instead of leaving
+// the caller stuck on "Initializing..." forever with no way out.
 func (m model) preparePoolAccess(pool string) tea.Cmd {
 	return func() tea.Msg {
 		// Check if pool is imported
@@ -3805,12 +3825,10 @@ func (m model) preparePoolAccess(pool string) tea.Cmd {
 		}
 
 		if !imported {
-			// Try to import the pool
-			cmd := exec.Command("sudo", "zpool", "import", pool)
-			if err := cmd.Run(); err != nil {
-				// Try without sudo
-				cmd = exec.Command("zpool", "import", pool)
-				if err := cmd.Run(); err != nil {
+			ctx := context.Background()
+			// Try to import the pool, with sudo then without.
+			if err := defaultRunner.Run(ctx, "sudo", "zpool", "import", pool); err != nil {
+				if err := defaultRunner.Run(ctx, "zpool", "import", pool); err != nil {
 					return poolReadyMsg{pool: pool, err: fmt.Errorf("failed to import pool: %w", err)}
 				}
 			}
@@ -3820,19 +3838,26 @@ func (m model) preparePoolAccess(pool string) tea.Cmd {
 	}
 }
 
+// loadPoolKey unlocks an encrypted pool with the given passphrase, bounded by
+// actionTimeout so a wedged pool fails with an error instead of hanging the
+// whole unlock-and-continue flow forever. Shared by every unlockAndLoadX
+// helper below - one timeout fix instead of one per caller.
+func loadPoolKey(pool, password string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "zfs", "load-key", pool)
+	cmd.Stdin = strings.NewReader(password + "\n")
+	return cmd.Run()
+}
+
 // unlockAndLoadMaintenance unlocks the pool and loads maintenance status
 func (m model) unlockAndLoadMaintenance() tea.Cmd {
 	pool := m.maintenancePool
 	password := m.password
 	return func() tea.Msg {
-		// Try to unlock the pool
-		cmd := exec.Command("zfs", "load-key", pool)
-		cmd.Stdin = strings.NewReader(password + "\n")
-		if err := cmd.Run(); err != nil {
+		if err := loadPoolKey(pool, password); err != nil {
 			return maintenanceStatusMsg{err: fmt.Errorf("failed to unlock pool: %w", err)}
 		}
-
-		// Now load the status
 		return loadMaintenanceStatusSync(pool)
 	}
 }
@@ -3842,13 +3867,55 @@ func (m model) unlockAndLoadQuotas() tea.Cmd {
 	pool := m.quotaPool
 	password := m.password
 	return func() tea.Msg {
-		cmd := exec.Command("zfs", "load-key", pool)
-		cmd.Stdin = strings.NewReader(password + "\n")
-		if err := cmd.Run(); err != nil {
+		if err := loadPoolKey(pool, password); err != nil {
 			return quotaLoadedMsg{err: fmt.Errorf("failed to unlock pool: %w", err)}
 		}
 		// Reuse the loadQuotaData command's inner logic
-		return loadQuotaData(pool)().(tea.Msg)
+		return loadQuotaData(pool)()
+	}
+}
+
+// unlockAndLoadCleanupPlan unlocks the pool and builds the orphan-cleanup
+// plan. Without this, "Clean Up Orphaned Snapshots" on a pool that needs a
+// passphrase fell through to startOperation(), which has no case for
+// "cleanup" - the screen was left spinning on "Initializing..." forever with
+// nothing actually running.
+func (m model) unlockAndLoadCleanupPlan() tea.Cmd {
+	pool := m.cleanupPool
+	password := m.password
+	return func() tea.Msg {
+		if err := loadPoolKey(pool, password); err != nil {
+			return cleanupPlanMsg{pool: pool, err: fmt.Errorf("failed to unlock pool: %w", err)}
+		}
+		return loadCleanupPlan(pool)()
+	}
+}
+
+// unlockAndLoadDoctorReport unlocks the pool and runs the health check - see
+// unlockAndLoadCleanupPlan for why this case must not fall through to
+// startOperation().
+func (m model) unlockAndLoadDoctorReport() tea.Cmd {
+	pool := m.doctorPool
+	password := m.password
+	return func() tea.Msg {
+		if err := loadPoolKey(pool, password); err != nil {
+			return doctorLoadedMsg{pool: pool, err: fmt.Errorf("failed to unlock pool: %w", err)}
+		}
+		return loadDoctorReport(pool)()
+	}
+}
+
+// unlockAndLoadScope unlocks the pool and loads its backup scope - see
+// unlockAndLoadCleanupPlan for why this case must not fall through to
+// startOperation().
+func (m model) unlockAndLoadScope() tea.Cmd {
+	pool := m.scopePool
+	password := m.password
+	return func() tea.Msg {
+		if err := loadPoolKey(pool, password); err != nil {
+			return scopeLoadedMsg{pool: pool, err: fmt.Errorf("failed to unlock pool: %w", err)}
+		}
+		return loadBackupScope(pool)()
 	}
 }
 

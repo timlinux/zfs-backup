@@ -110,6 +110,42 @@ func TestEveryDestructiveEntryDeclaresItsGuard(t *testing.T) {
 	}
 }
 
+// The progress screen used to say "Backup in Progress" / "Running: cleanup"
+// no matter which menu item you picked - a cleanup was mislabelled as a
+// backup, and the status line named an internal code, not what you chose.
+// operationNames fixes that, but only if it stays in sync: every value must
+// be a real, current menu title (so a renamed title is caught here, not left
+// silently stale), and it must cover every operation the dispatch below
+// actually sets.
+func TestOperationNamesCoverEveryDispatchedOperation(t *testing.T) {
+	titles := map[string]bool{}
+	for _, section := range menuSections {
+		for _, item := range section.items {
+			titles[item.title] = true
+		}
+	}
+
+	for op, title := range operationNames {
+		if !titles[title] {
+			t.Errorf("operationNames[%q] = %q, which is not a current menu title", op, title)
+		}
+	}
+
+	// Every operation code the enter-key dispatch can set (main.go's
+	// `switch selected.title` block) must resolve to a display name -
+	// otherwise the progress screen falls back to the raw code again.
+	dispatched := []string{
+		"backup", "remote-backup", "push-backup", "force-backup", "prepare",
+		"zpoolinfo", "recover-pool", "maintenance", "quotas", "scope",
+		"browse", "cleanup", "doctor", "recover", "unmount",
+	}
+	for _, op := range dispatched {
+		if operationDisplayName(op) == op {
+			t.Errorf("operation %q has no display name - the progress screen would show the raw code", op)
+		}
+	}
+}
+
 func TestMenuTitlesAreUniqueAndComplete(t *testing.T) {
 	seen := map[string]bool{}
 	for _, section := range menuSections {
@@ -143,6 +179,54 @@ func TestWideMenuShowsTheDetailCard(t *testing.T) {
 	}
 	if !strings.Contains(out, "─") {
 		t.Error("section rules should be drawn")
+	}
+}
+
+// menuRowIndex finds the row index of a titled item in the unfiltered menu,
+// for tests that need to point m.menuIndex at a specific item.
+func menuRowIndex(t *testing.T, title string) int {
+	t.Helper()
+	for i, row := range visibleMenuRows("") {
+		if row.item != nil && row.item.title == title {
+			return i
+		}
+	}
+	t.Fatalf("no menu item titled %q", title)
+	return -1
+}
+
+// hasDetailCard reports whether the rendered menu shows the two-pane detail
+// box (its rounded top-left corner is a mark narrow mode never produces).
+func hasDetailCard(out string) bool {
+	return strings.Contains(out, "╭")
+}
+
+// At a terminal height that fits a short detail card but not a long one in
+// full, both items must still show the hint panel - the reported bug was
+// that the long one lost its panel entirely (falling back to the one-line
+// narrow view) while the short one kept a full card, and a naive fix that
+// makes both disappear instead of both appear is just as wrong: the whole
+// point of the panel is to be there when the terminal is wide enough.
+func TestMenuHintPanelShowsForShortAndLongDetailAlikeAtAMarginalHeight(t *testing.T) {
+	const width = 120
+	// "Pool Information" has one of the shortest detail cards (10 lines);
+	// "Browse Backup Snapshots" one of the tallest (20 lines).
+	short := menuRowIndex(t, "Pool Information")
+	tall := menuRowIndex(t, "Browse Backup Snapshots")
+
+	m := model{menuIndex: short, height: 26, width: width}
+	shortOut := m.renderMenu(width)
+	if !hasDetailCard(shortOut) {
+		t.Error("the short-detail item should show its hint panel in full")
+	}
+
+	m.menuIndex = tall
+	tallOut := m.renderMenu(width)
+	if !hasDetailCard(tallOut) {
+		t.Error("the long-detail item should still show a hint panel, truncated if necessary - not none at all")
+	}
+	if !strings.Contains(tallOut, "more below") {
+		t.Error("a truncated panel should say there is more, not cut off silently")
 	}
 }
 

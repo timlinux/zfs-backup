@@ -190,6 +190,40 @@ type menuRow struct {
 	item   *menuItem
 }
 
+// operationNames maps the internal operation code set in m.operation (by the
+// enter-key dispatch, keyed on menu item title) back to that same title, so
+// progress and status screens describe what the user actually chose - "Clean
+// Up Orphaned Snapshots" - instead of the internal code name - "cleanup".
+// TestOperationNamesCoverEveryDispatchedOperation keeps this in sync with
+// the dispatch switch and with real menu titles.
+var operationNames = map[string]string{
+	"backup":        "Back Up Now",
+	"remote-backup": "Pull Backup From Remote",
+	"push-backup":   "Push Backup to Remote",
+	"force-backup":  "Force Full Backup",
+	"prepare":       "Prepare Backup Device",
+	"zpoolinfo":     "Pool Information",
+	"recover-pool":  "Fix a Pool That Stopped Responding",
+	"maintenance":   "Pool Maintenance",
+	"quotas":        "Manage Datasets",
+	"scope":         "Backup Scope",
+	"browse":        "Browse Backup Snapshots",
+	"cleanup":       "Clean Up Orphaned Snapshots",
+	"doctor":        "Backup Health Check",
+	"recover":       "Recover Failed Backup",
+	"unmount":       "Unmount Backup Disk",
+}
+
+// operationDisplayName returns the user-facing name for an operation code,
+// falling back to the raw code if it is somehow unrecognised - a slightly
+// technical label beats a blank one.
+func operationDisplayName(operation string) string {
+	if name, ok := operationNames[operation]; ok {
+		return name
+	}
+	return operation
+}
+
 // visibleMenuRows flattens the sections into rows, applying the filter. With
 // a filter, only matching items (and the headers of sections that still have
 // matches) remain.
@@ -294,33 +328,87 @@ func (m model) renderMenu(width int) string {
 		}
 	}
 
-	try := func(narrow bool) string {
-		out := m.renderMenuWindow(width, allRows, fullCursor, 0, narrow)
-		if avail > 0 && strings.Count(out, "\n") > avail {
-			for budget := min(len(allRows), avail); budget >= 4; budget-- {
-				out = m.renderMenuWindow(width, allRows, fullCursor, budget, narrow)
-				if strings.Count(out, "\n") <= avail {
-					break
-				}
+	// A terminal too narrow for two columns still falls back to the
+	// single-pane list - there is genuinely no room for a side-by-side card.
+	// A terminal that is merely short is a different problem: the card must
+	// not vanish depending on which item's detail happens to be longer than
+	// the others, so it truncates itself to whatever height is available
+	// (see renderMenuDetailCard) instead of the whole layout dropping to
+	// narrow mode. Every item gets a panel; a long one just gets a shorter
+	// one, consistently, rather than none at all.
+	narrow := width < twoPaneMinWidth
+
+	out := m.renderMenuWindow(width, allRows, fullCursor, 0, narrow, avail)
+	if avail > 0 && strings.Count(out, "\n") > avail {
+		for budget := min(len(allRows), avail); budget >= 4; budget-- {
+			out = m.renderMenuWindow(width, allRows, fullCursor, budget, narrow, avail)
+			if strings.Count(out, "\n") <= avail {
+				break
 			}
 		}
-		return out
+	}
+	return out
+}
+
+// renderMenuDetailCard renders the styled detail box for one menu item, as
+// shown in the two-pane layout's right-hand pane. maxLines caps the box's
+// own rendered height (0 = unlimited); when the full detail would not fit,
+// it is trimmed line by line from the end and a "more below" note takes its
+// place, so a long-detail item still shows a panel instead of none at all.
+func renderMenuDetailCard(item menuItem, detailWidth, maxLines int) string {
+	build := func(bodyLines []string, truncated bool) string {
+		var card strings.Builder
+		card.WriteString(selectedItemStyle.Render(item.title))
+		card.WriteString("\n")
+		card.WriteString(safetyBadge(item.safety))
+		card.WriteString("\n\n")
+		if len(bodyLines) > 0 {
+			card.WriteString(strings.Join(bodyLines, "\n"))
+			card.WriteString("\n")
+		}
+		if truncated {
+			card.WriteString(mutedStyle.Render("  ▼ more below"))
+			card.WriteString("\n")
+		} else if item.guard != "" {
+			card.WriteString("\n")
+			card.WriteString(warningStyle.Render("Guard: " + item.guard))
+			card.WriteString("\n")
+		}
+		return reportBoxStyle.Width(detailWidth).Render(card.String())
 	}
 
-	out := try(false)
-	// The detail card has a fixed floor no row budget can get under, so a
-	// wide-but-short terminal (120x24 is common) cannot seat the two-pane
-	// layout at all. Fall back to the single-pane list, which the budget
-	// loop CAN always shrink to fit.
-	if avail > 0 && strings.Count(out, "\n") > avail {
-		out = try(true)
+	fullLines := strings.Split(item.detail, "\n")
+	full := build(fullLines, false)
+	if maxLines <= 0 || strings.Count(full, "\n") <= maxLines {
+		return full
+	}
+
+	// Too tall for the space: wrap the detail to the pane's actual inner
+	// width ourselves (border + padding cost 6 columns) so lines can be
+	// dropped one at a time from the end - a coarser cut, by paragraph or by
+	// nothing at all, can still overshoot when a single paragraph alone is
+	// taller than the whole budget.
+	innerWidth := detailWidth - 6
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	wrapped := strings.Split(lipgloss.NewStyle().Width(innerWidth).Render(item.detail), "\n")
+
+	out := full
+	for n := len(wrapped) - 1; n >= 0; n-- {
+		candidate := build(wrapped[:n], true)
+		if strings.Count(candidate, "\n") <= maxLines {
+			return candidate
+		}
+		out = candidate
 	}
 	return out
 }
 
 // renderMenuWindow draws the menu over a row window. budget <= 0 renders
 // everything; narrow forces the single-pane layout regardless of width.
-func (m model) renderMenuWindow(width int, allRows []menuRow, fullCursor, budget int, narrow bool) string {
+// maxCardLines caps the detail card's height when the layout is two-pane.
+func (m model) renderMenuWindow(width int, allRows []menuRow, fullCursor, budget int, narrow bool, maxCardLines int) string {
 	rows, cursor, above, below := windowMenuRows(allRows, fullCursor, budget)
 
 	var list strings.Builder
@@ -393,24 +481,13 @@ func (m model) renderMenuWindow(width int, allRows []menuRow, fullCursor, budget
 	}
 
 	// Detail pane for the highlighted item.
-	var card strings.Builder
+	detailWidth := min(64, width-menuListWidth-8)
+	var right string
 	if item, ok := m.currentMenuItem(); ok {
-		card.WriteString(selectedItemStyle.Render(item.title))
-		card.WriteString("\n")
-		card.WriteString(safetyBadge(item.safety))
-		card.WriteString("\n\n")
-		card.WriteString(item.detail)
-		card.WriteString("\n")
-		if item.guard != "" {
-			card.WriteString("\n")
-			card.WriteString(warningStyle.Render("Guard: " + item.guard))
-			card.WriteString("\n")
-		}
+		right = renderMenuDetailCard(item, detailWidth, maxCardLines)
 	}
 
-	detailWidth := min(64, width-menuListWidth-8)
 	left := lipgloss.NewStyle().Width(menuListWidth).Render(list.String())
-	right := reportBoxStyle.Width(detailWidth).Render(card.String())
 	joined := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
 
 	return lipgloss.PlaceHorizontal(width, lipgloss.Center, joined)

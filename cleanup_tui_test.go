@@ -523,3 +523,87 @@ func TestCleanupConfirmAdvertisesScrollWhenTheListIsLong(t *testing.T) {
 		t.Errorf("the confirm hotkeys must mention scrolling: %q", m.cleanupHotkeys())
 	}
 }
+
+// Confirming DESTROY must arm the progress channel and total up front, so the
+// running screen has something to count against from its very first frame.
+func TestCleanupConfirmArmsDestroyProgress(t *testing.T) {
+	m := cleanupModel()
+	m, _ = m.updateCleanupScreen(keyRunes("d"))
+	m.input.SetValue(destroyConfirmationWord)
+
+	m, _ = m.updateCleanupScreen(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.cleanupDestroyTotal != len(m.cleanupPlan.Targets) {
+		t.Errorf("destroy total = %d, want %d", m.cleanupDestroyTotal, len(m.cleanupPlan.Targets))
+	}
+	if m.cleanupDestroyDone != 0 {
+		t.Errorf("destroy done = %d, want 0 at the start of a run", m.cleanupDestroyDone)
+	}
+	if m.cleanupDestroyProgress == nil {
+		t.Fatal("the progress channel must be created before the destroy loop starts")
+	}
+}
+
+// The running screen must count snapshots as they die, not sit on a bare
+// spinner until the whole batch finishes - that was the entire bug.
+func TestCleanupRunningScreenCountsAsSnapshotsDestroy(t *testing.T) {
+	m := cleanupModel()
+	m.width, m.height = 80, 24
+	m.cleanupPhase = cleanupPhaseRunning
+	m.cleanupDestroyTotal = len(m.cleanupPlan.Targets)
+	m.cleanupDestroyDone = 0
+
+	before := m.renderCleanupContent(80)
+	if !strings.Contains(before, fmt.Sprintf("snapshot 1 of %d", m.cleanupDestroyTotal)) {
+		t.Errorf("running screen should start at snapshot 1: %q", before)
+	}
+
+	m.cleanupDestroyDone = 1
+	after := m.renderCleanupContent(80)
+	if !strings.Contains(after, fmt.Sprintf("snapshot 2 of %d", m.cleanupDestroyTotal)) {
+		t.Errorf("running screen should advance with each destroy: %q", after)
+	}
+}
+
+// performCleanup must report one tick per destroyed snapshot on the progress
+// channel, and close it when the run is done - the running screen's whole
+// count depends on both halves of that contract.
+func TestPerformCleanupReportsProgressPerSnapshot(t *testing.T) {
+	targets := []string{
+		"NIXROOT/root@2026-01-01.00h-00-Backup",
+		"NIXROOT/root@2026-01-02.00h-00-Backup",
+	}
+	swapRunner(t, &fakeRunner{})
+
+	progress := make(chan struct{}, 1)
+	cmd := performCleanup("NIXROOT", targets, progress)
+
+	ticks := 0
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+
+	for ticks < len(targets) {
+		select {
+		case <-progress:
+			ticks++
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for tick %d of %d", ticks+1, len(targets))
+		}
+	}
+	if _, stillOpen := <-progress; stillOpen {
+		t.Error("the progress channel must be closed once every target is processed")
+	}
+
+	select {
+	case msg := <-done:
+		outcome, ok := msg.(cleanupDoneMsg)
+		if !ok {
+			t.Fatalf("performCleanup returned %T, want cleanupDoneMsg", msg)
+		}
+		if len(outcome.outcome.Destroyed) != len(targets) {
+			t.Errorf("destroyed %d snapshots, want %d", len(outcome.outcome.Destroyed), len(targets))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("performCleanup never returned its done message")
+	}
+}

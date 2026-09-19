@@ -2015,7 +2015,10 @@ func isPoolImported(poolName string) (bool, error) {
 	// `zpool list` table instead meant a substring hit anywhere - a longer pool
 	// name, a column heading, a size - counted as "imported", so the import was
 	// skipped and the next stage talked to a pool that was not there.
-	output, err := runCommandOutput("zpool", "list", "-H", "-o", "name")
+	//
+	// Goes through defaultRunner, not runCommandOutput directly, so tests can
+	// fake it and callers get the same bounded timeout as every other query.
+	output, err := defaultRunner.Output(context.Background(), "zpool", "list", "-H", "-o", "name")
 	if err != nil {
 		return false, err
 	}

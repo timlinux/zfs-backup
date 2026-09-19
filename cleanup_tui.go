@@ -55,6 +55,19 @@ type cleanupDoneMsg struct {
 	usage   []datasetUsage
 }
 
+// cleanupDestroyProgressMsg reports one snapshot destroyed mid-run.
+type cleanupDestroyProgressMsg struct{}
+
+// listenCleanupDestroyProgress relays one progress tick from the destroy run.
+func listenCleanupDestroyProgress(progress chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		if _, ok := <-progress; !ok {
+			return nil
+		}
+		return cleanupDestroyProgressMsg{}
+	}
+}
+
 // loadCleanupPlan builds the plan and asks ZFS what each destroy would free.
 // Read-only: this command never destroys anything.
 func loadCleanupPlan(pool string) tea.Cmd {
@@ -72,12 +85,16 @@ func loadCleanupPlan(pool string) tea.Cmd {
 	}
 }
 
-// performCleanup destroys the vetted targets and re-reads space usage so the
-// screen can show what the cleanup actually bought.
-func performCleanup(pool string, targets []string) tea.Cmd {
+// performCleanup destroys the vetted targets, reporting each destroy through
+// the progress channel so the running view can count along instead of
+// sitting on a bare spinner, then re-reads space usage so the screen can show
+// what the cleanup actually bought.
+func performCleanup(pool string, targets []string, progress chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		outcome := destroyPlannedSnapshots(ctx, defaultRunner, targets, nil)
+		outcome := destroyPlannedSnapshots(ctx, defaultRunner, targets,
+			func(string) { progress <- struct{}{} })
+		close(progress)
 		usage, err := listDatasetUsage(ctx, defaultRunner, pool)
 		if err != nil {
 			usage = nil
@@ -170,7 +187,12 @@ func (m model) updateCleanupConfirm(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.input.SetValue("")
 		m.cleanupPhase = cleanupPhaseRunning
 		m.cleanupMessage = ""
-		return m, tea.Batch(m.spinner.Tick, performCleanup(m.cleanupPool, m.cleanupPlan.Targets))
+		m.cleanupDestroyTotal = len(m.cleanupPlan.Targets)
+		m.cleanupDestroyDone = 0
+		m.cleanupDestroyProgress = make(chan struct{}, 1)
+		return m, tea.Batch(m.spinner.Tick,
+			performCleanup(m.cleanupPool, m.cleanupPlan.Targets, m.cleanupDestroyProgress),
+			listenCleanupDestroyProgress(m.cleanupDestroyProgress))
 	}
 
 	var cmd tea.Cmd
@@ -219,7 +241,8 @@ func (m model) renderCleanupContent(width int) string {
 		b.WriteString("\n")
 		b.WriteString(centre.Render(m.input.View()))
 	case cleanupPhaseRunning:
-		b.WriteString(centre.Render(m.spinner.View() + " Destroying snapshots..."))
+		b.WriteString(centre.Render(fmt.Sprintf("%s Destroying snapshot %d of %d...",
+			m.spinner.View(), min(m.cleanupDestroyDone+1, m.cleanupDestroyTotal), m.cleanupDestroyTotal)))
 	case cleanupPhaseDone:
 		b.WriteString(centre.Render(m.renderCleanupDoneFooter()))
 	}
