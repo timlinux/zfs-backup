@@ -9,6 +9,37 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-09-19
+
+### Fixed
+
+- **Cleanup destroy screen showed no progress.** "Clean Up Orphaned
+  Snapshots" now reports "Destroying snapshot N of M..." live as each
+  snapshot is destroyed, instead of a bare spinner with no indication of
+  movement for the whole run.
+- **Menu hint panel disappeared for some items but not others.** The
+  two-pane detail card next to the highlighted menu item used to vanish at
+  short terminal heights only for items with longer detail text, flickering
+  in and out as the cursor moved. It now truncates itself to fit, with a
+  "more below" note, so every item shows a panel at any terminal size wide
+  enough for the two-pane layout.
+- **Progress and status screens mislabelled the operation.** Any operation
+  reached through the generic progress screen (e.g. "Clean Up Orphaned
+  Snapshots") was shown as "Backup in Progress" with a status line reading
+  the internal code name (`Running: cleanup`) instead of the menu item you
+  chose.
+- **"Clean Up Orphaned Snapshots", "Backup Health Check" and "Backup
+  Scope" hung forever on "Initializing..." when the backup pool needed a
+  passphrase.** Submitting the passphrase for one of these routed into the
+  generic backup pipeline, which has no case for them and never started any
+  real work - the screen spun indefinitely with no error and no way out
+  short of ctrl+c. Each now unlocks the pool and continues straight to its
+  own screen.
+- **Pool import and key-unlock commands could hang forever with zero
+  feedback.** `zpool import` and `zfs load-key` ran with no timeout; a
+  missing or unresponsive pool left the app stuck with no error. Both are
+  now bounded the same way every other command in the app is.
+
 ## [2.2.0] - 2026-09-10
 
 ### Added
