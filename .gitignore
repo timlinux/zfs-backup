@@ -31,7 +31,7 @@ result-*
 .DS_Store
 .claude/
 .direnv/
-screenshots_gitignore
+screensh*[-_]gitignore/
 
 # Transient working files used by Claude Code sessions
 PROMPT.log
