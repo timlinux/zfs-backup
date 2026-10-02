@@ -40,3 +40,18 @@ func (execRunner) Output(ctx context.Context, name string, args ...string) (stri
 
 // defaultRunner is the commandRunner used by the application entry points.
 var defaultRunner commandRunner = execRunner{}
+
+// sshRunner is a commandRunner that runs every command on a remote host over
+// SSH, so code written against commandRunner (e.g. byte-progress estimation)
+// works unchanged whether the dataset it is querying is local or remote.
+type sshRunner struct {
+	host string
+}
+
+func (s sshRunner) Run(ctx context.Context, name string, args ...string) error {
+	return execRunner{}.Run(ctx, "ssh", append([]string{s.host, name}, args...)...)
+}
+
+func (s sshRunner) Output(ctx context.Context, name string, args ...string) (string, error) {
+	return execRunner{}.Output(ctx, "ssh", append([]string{s.host, name}, args...)...)
+}

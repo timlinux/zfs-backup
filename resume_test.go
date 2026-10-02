@@ -59,9 +59,17 @@ func TestShouldSkipStageIsFalseForWorkNeverDone(t *testing.T) {
 }
 
 // Every revocable stage must be one whose body is safe to run again.
+//
+// StageCheckCapacity belongs here alongside the import/key preconditions:
+// free space and what is left to send both change between runs (another
+// process can fill the disk, or a previous attempt can have already sent
+// part of this run's data), so skipping the re-check on resume would let a
+// resumed run sail past a shortfall the first attempt would have caught.
+// Its body - a dry-run estimate, a proactive prune, a comparison - has no
+// effect that is unsafe to repeat.
 func TestRevocableStagesAreOnlyThePreconditionStages(t *testing.T) {
 	for stage := range revocableStages {
-		if stage != StageImportPool && stage != StageLoadKey {
+		if stage != StageImportPool && stage != StageLoadKey && stage != StageCheckCapacity {
 			t.Errorf("%s is marked revocable but re-running it may not be idempotent", stage)
 		}
 	}

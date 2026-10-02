@@ -158,6 +158,15 @@ type DatasetProgress struct {
 	Snapshots []SnapshotDot     // Snapshots belonging to this dataset
 	Duration  time.Duration     // How long the sync took
 	Size      string            // Dataset size (from zfs list)
+
+	// Live byte-level progress for the current sync attempt, refreshed every
+	// poll tick so a single-snapshot, multi-hour transfer still visibly
+	// moves instead of sitting on one unchanging dot. EstBytes is 0 when no
+	// estimate could be made (e.g. the very first send of a dataset).
+	SentBytes int64         // Bytes received at the destination since this sync started
+	EstBytes  int64         // Estimated total bytes for this sync (0 = unknown)
+	Rate      float64       // Bytes/sec, computed from elapsed time
+	ETA       time.Duration // Estimated time remaining for this dataset (0 = unknown)
 }
 
 // progressUpdate is sent to update the UI during backup
@@ -317,13 +326,23 @@ func readPasswordLine(r io.Reader) (string, error) {
 	return strings.TrimRight(line, "\r\n"), nil
 }
 
+// headlessProgressInterval is the minimum gap between byte-progress lines
+// for the same still-syncing dataset, so a multi-hour transfer narrates
+// itself periodically without flooding the log at the 2s poll rate.
+const headlessProgressInterval = 30 * time.Second
+
 // streamHeadlessProgress prints stage and per-dataset transitions as they
 // happen, so a headless run narrates itself instead of sitting silent for
 // hours and dumping everything at the end. A dataset's failure is printed
-// the moment it occurs, with its reason - not when the run finishes.
+// the moment it occurs, with its reason - not when the run finishes. While a
+// dataset's status is unchanged (still DatasetSyncing), a byte-progress line
+// is printed every headlessProgressInterval so a large single-snapshot
+// transfer keeps visibly moving instead of going silent between "syncing..."
+// and the final result.
 func streamHeadlessProgress(w io.Writer, updates <-chan progressUpdate) {
 	lastStageNum := 0
 	status := map[string]DatasetSyncStatus{}
+	lastProgressPrint := map[string]time.Time{}
 	for u := range updates {
 		if u.stageNum != lastStageNum {
 			fmt.Fprintf(w, "[%d/%d] %s\n", u.stageNum, u.totalStages, u.stage)
@@ -332,12 +351,20 @@ func streamHeadlessProgress(w io.Writer, updates <-chan progressUpdate) {
 		for _, d := range u.datasets {
 			prev, seen := status[d.Name]
 			if seen && prev == d.Status {
+				if d.Status == DatasetSyncing {
+					if summary := datasetProgressSummary(d); summary != "" &&
+						time.Since(lastProgressPrint[d.Name]) >= headlessProgressInterval {
+						fmt.Fprintf(w, "    %s: %s\n", d.Name, summary)
+						lastProgressPrint[d.Name] = time.Now()
+					}
+				}
 				continue
 			}
 			status[d.Name] = d.Status
 			switch d.Status {
 			case DatasetSyncing:
 				fmt.Fprintf(w, "  syncing %s (%s)...\n", d.Name, d.Size)
+				lastProgressPrint[d.Name] = time.Now()
 			case DatasetDone:
 				fmt.Fprintf(w, "  [OK] %s (%s)\n", d.Name, d.Duration.Round(time.Second))
 			case DatasetError, DatasetSkipped:
@@ -447,7 +474,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 		return "", fmt.Errorf("failed to save state: %w", err)
 	}
 
-	totalStages := 7
+	totalStages := 8
 	currentStage := 1
 
 	// Helper to send progress updates
@@ -575,12 +602,72 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 		return output.String(), err
 	}
 
+	// Stage 4: Check the backup disk has room for this run before sending
+	// anything. A sync that runs out of space partway through leaves a
+	// partial transfer behind instead of failing cleanly, so it is far
+	// cheaper to catch a shortfall here - using the same dry-run estimate
+	// the sync stage itself relies on - than to discover it mid-transfer.
+	err = executeStage(StageCheckCapacity, "📦 Checking backup disk capacity", func() error {
+		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		output.WriteString("📖 CAPACITY CHECK\n")
+		output.WriteString("   Estimating how much this run needs to send, and comparing it\n")
+		output.WriteString("   against the free space on the backup disk, before any data\n")
+		output.WriteString("   starts moving.\n")
+		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+		hostname := getLocalHostname()
+		requirements := make([]datasetRequirement, 0, len(datasets))
+		for _, ds := range datasets {
+			fullDS := fmt.Sprintf("%s/%s", sourcePool, ds)
+			syncDest := resolveBackupDestination(destPool, hostname, ds)
+			need := estimateDatasetSendBytes(ctx, defaultRunner, fullDS, getSnapshotsForDataset(fullDS),
+				func() map[string]bool { return listDestSnapshotTags(syncDest) })
+			requirements = append(requirements, datasetRequirement{Dataset: ds, RequiredBytes: need})
+		}
+
+		check := checkBackupCapacity(ctx, defaultRunner, destPool, requirements)
+		output.WriteString(fmt.Sprintf("Estimated requirement: %s\n", formatSize(check.RequiredBytes)))
+		if check.AvailableKnown {
+			output.WriteString(fmt.Sprintf("Free on %s: %s\n", destPool, formatSize(check.AvailableBytes)))
+		}
+
+		if check.Sufficient() {
+			output.WriteString("[OK] Enough free space for this run.\n")
+			return nil
+		}
+
+		// Not enough room yet: reclaim what the retention policy allows before
+		// giving up. The prune-after-sync stage further down never gets a
+		// chance to run if the sync itself can't start, so this is the one
+		// point in the run that can proactively make room.
+		output.WriteString("Not enough free space - pruning the backup disk under the retention policy first...\n")
+		destinations := backupDestinations(destPool, hostname, datasets)
+		writePruneResult(&output, pruneDestinationSnapshots(ctx, defaultRunner, destinations, defaultRetentionPolicy, time.Now()))
+
+		recheck := checkBackupCapacity(ctx, defaultRunner, destPool, requirements)
+		var reclaimed int64
+		if check.AvailableKnown && recheck.AvailableKnown && recheck.AvailableBytes > check.AvailableBytes {
+			reclaimed = recheck.AvailableBytes - check.AvailableBytes
+		}
+
+		if recheck.Sufficient() {
+			output.WriteString(fmt.Sprintf("[OK] Pruning freed %s - enough room now.\n", formatSize(reclaimed)))
+			return nil
+		}
+
+		output.WriteString("\n" + capacityAdvisory(recheck, reclaimed))
+		return fmt.Errorf("not enough free space on %s for this backup: %s", destPool, capacityShortfallSummary(recheck))
+	})
+	if err != nil {
+		return output.String(), err
+	}
+
 	// Datasets whose replication failed. Collected during the sync stage and
 	// reported at the end of the run so the process exits non-zero.
 	var failedDatasets []string
 	failedReasons := map[string]string{}
 
-	// Stage 4: Sync the datasets in scope
+	// Stage 5: Sync the datasets in scope
 	err = executeStage(StageSyncData, "📨 Syncing data to backup disk", func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 INCREMENTAL SYNC (using syncoid)\n")
@@ -643,13 +730,18 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 
 			syncErr := trackSyncProgress(
 				ctx,
-				dsProgress[i].Snapshots,
+				defaultRunner,
+				syncSrc,
+				&dsProgress[i],
 				func() map[string]bool { return listDestSnapshotTags(syncDest) },
+				func() (int64, bool) { return datasetUsedBytes(ctx, defaultRunner, syncDest) },
 				func() {
 					sendDatasetProgress(progressChan, fmt.Sprintf("Syncing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 				},
 				func() error {
-					return runSyncoidWithTimeout(ctx, syncoidTimeoutFor(ctx, defaultRunner, syncSrc), syncoidBaseArgs(syncSrc, syncDest)...)
+					return runSyncoidWithResumeRecovery(ctx, syncoidTimeoutFor(ctx, defaultRunner, syncSrc), syncoidBaseArgs(syncSrc, syncDest),
+						func(ctx context.Context) error { return defaultRunner.Run(ctx, "zfs", "receive", "-A", syncDest) },
+						&output)
 				},
 			)
 			if syncErr != nil {
@@ -674,7 +766,7 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 		return output.String(), err
 	}
 
-	// Stage 5: Prune local snapshots
+	// Stage 6: Prune local snapshots
 	err = executeStage(StagePruneLocal, "🔖 Pruning local snapshots", func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 PRUNE LOCAL SNAPSHOTS → BOOKMARKS\n")
@@ -685,33 +777,33 @@ func performBackup(ctx context.Context, password, sourcePool, destPool string, r
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 		output.WriteString("Creating bookmarks and pruning old snapshots...\n")
-		writePruneResult(&output, pruneLocalSnapshots(ctx, defaultRunner, sourcePool, datasets, localBackupSnapshotsKept))
+		writePruneResult(&output, pruneLocalSnapshots(ctx, defaultRunner, sourcePool, datasets, defaultRetentionPolicy, time.Now()))
 		return nil
 	})
 	if err != nil {
 		return output.String(), err
 	}
 
-	// Stage 6: Prune backup snapshots
+	// Stage 7: Prune backup snapshots
 	err = executeStage(StagePruneBackup, "🧹 Pruning backup snapshots", func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 PRUNE BACKUP SNAPSHOTS\n")
-		output.WriteString("   Old snapshots on the backup drive are pruned to save space.\n")
-		output.WriteString("   We keep recent snapshots plus monthly archives for the last\n")
-		output.WriteString("   3 months. Pruned snapshots are converted to bookmarks first\n")
-		output.WriteString("   to maintain the incremental backup chain.\n")
+		output.WriteString("   Old snapshots on the backup drive are pruned under the retention\n")
+		output.WriteString(retentionPolicyDescription(defaultRetentionPolicy) + "\n")
+		output.WriteString("   Pruned snapshots are converted to bookmarks first to maintain\n")
+		output.WriteString("   the incremental backup chain.\n")
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
-		output.WriteString("Keeping monthly archives...\n")
+		output.WriteString("Applying the retention policy...\n")
 		destinations := backupDestinations(destPool, getLocalHostname(), datasets)
-		writePruneResult(&output, pruneDestinationSnapshots(ctx, defaultRunner, destinations, time.Now()))
+		writePruneResult(&output, pruneDestinationSnapshots(ctx, defaultRunner, destinations, defaultRetentionPolicy, time.Now()))
 		return nil
 	})
 	if err != nil {
 		return output.String(), err
 	}
 
-	// Stage 7: Export and power off
+	// Stage 8: Export and power off
 	err = executeStage(StageExportPool, "[POOL]Exporting pool and powering off", func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 EXPORT & POWER OFF\n")
@@ -813,7 +905,7 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 		return "", fmt.Errorf("failed to save state: %w", err)
 	}
 
-	totalStages := 5
+	totalStages := 6
 	currentStage := 1
 
 	// Helper to send progress updates
@@ -926,11 +1018,68 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 		return output.String(), err
 	}
 
+	// Stage 4: Check the backup disk has room for this run before sending
+	// anything. Force backup can end up sending more than a plain incremental
+	// estimate suggests - it exists precisely for a broken chain, where
+	// syncoid may fall back to a full resend - so this is a floor on what is
+	// needed, not a guarantee, but it still catches an obviously-too-small
+	// disk before any data starts moving.
+	err = executeStage(StageCheckCapacity, "📦 Checking backup disk capacity", func() error {
+		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		output.WriteString("📖 CAPACITY CHECK\n")
+		output.WriteString("   Estimating how much this run needs to send, and comparing it\n")
+		output.WriteString("   against the free space on the backup disk, before any data\n")
+		output.WriteString("   starts moving.\n")
+		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+		hostname := getLocalHostname()
+		requirements := make([]datasetRequirement, 0, len(datasets))
+		for _, ds := range datasets {
+			fullDS := fmt.Sprintf("%s/%s", sourcePool, ds)
+			syncDest := resolveBackupDestination(destPool, hostname, ds)
+			need := estimateDatasetSendBytes(ctx, defaultRunner, fullDS, getSnapshotsForDataset(fullDS),
+				func() map[string]bool { return listDestSnapshotTags(syncDest) })
+			requirements = append(requirements, datasetRequirement{Dataset: ds, RequiredBytes: need})
+		}
+
+		check := checkBackupCapacity(ctx, defaultRunner, destPool, requirements)
+		output.WriteString(fmt.Sprintf("Estimated requirement: %s\n", formatSize(check.RequiredBytes)))
+		if check.AvailableKnown {
+			output.WriteString(fmt.Sprintf("Free on %s: %s\n", destPool, formatSize(check.AvailableBytes)))
+		}
+
+		if check.Sufficient() {
+			output.WriteString("[OK] Enough free space for this run.\n")
+			return nil
+		}
+
+		output.WriteString("Not enough free space - pruning the backup disk under the retention policy first...\n")
+		destinations := backupDestinations(destPool, hostname, datasets)
+		writePruneResult(&output, pruneDestinationSnapshots(ctx, defaultRunner, destinations, defaultRetentionPolicy, time.Now()))
+
+		recheck := checkBackupCapacity(ctx, defaultRunner, destPool, requirements)
+		var reclaimed int64
+		if check.AvailableKnown && recheck.AvailableKnown && recheck.AvailableBytes > check.AvailableBytes {
+			reclaimed = recheck.AvailableBytes - check.AvailableBytes
+		}
+
+		if recheck.Sufficient() {
+			output.WriteString(fmt.Sprintf("[OK] Pruning freed %s - enough room now.\n", formatSize(reclaimed)))
+			return nil
+		}
+
+		output.WriteString("\n" + capacityAdvisory(recheck, reclaimed))
+		return fmt.Errorf("not enough free space on %s for this backup: %s", destPool, capacityShortfallSummary(recheck))
+	})
+	if err != nil {
+		return output.String(), err
+	}
+
 	// Datasets whose replication failed, reported at the end of the run.
 	var failedDatasets []string
 	failedReasons := map[string]string{}
 
-	// Stage 4: Force sync the datasets in scope
+	// Stage 5: Force sync the datasets in scope
 	err = executeStage(StageSyncData, "📨 Force syncing to backup disk", func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 FORCE SYNC (DESTRUCTIVE)\n")
@@ -987,13 +1136,18 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 
 			syncErr := trackSyncProgress(
 				ctx,
-				dsProgress[i].Snapshots,
+				defaultRunner,
+				syncSrc,
+				&dsProgress[i],
 				func() map[string]bool { return listDestSnapshotTags(syncDest) },
+				func() (int64, bool) { return datasetUsedBytes(ctx, defaultRunner, syncDest) },
 				func() {
 					sendDatasetProgress(progressChan, fmt.Sprintf("Force syncing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 				},
 				func() error {
-					return runSyncoidWithTimeout(ctx, syncoidTimeoutFor(ctx, defaultRunner, syncSrc), syncoidBaseArgs(syncSrc, syncDest, "--force-delete")...)
+					return runSyncoidWithResumeRecovery(ctx, syncoidTimeoutFor(ctx, defaultRunner, syncSrc), syncoidBaseArgs(syncSrc, syncDest, "--force-delete"),
+						func(ctx context.Context) error { return defaultRunner.Run(ctx, "zfs", "receive", "-A", syncDest) },
+						&output)
 				},
 			)
 			if syncErr != nil {
@@ -1016,7 +1170,7 @@ func performForceBackup(ctx context.Context, password, sourcePool, destPool stri
 		return output.String(), err
 	}
 
-	// Stage 5: List snapshots
+	// Stage 6: List snapshots
 	err = executeStage(StagePruneBackup, "📝 Listing snapshots", func() error {
 		output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		output.WriteString("📖 SNAPSHOT SUMMARY\n")
@@ -1432,7 +1586,7 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 		return "", fmt.Errorf("failed to save state: %w", err)
 	}
 
-	totalStages := 5
+	totalStages := 6
 	currentStage := 1
 
 	sendProgress := func(stage string, stageEnum BackupStage) error {
@@ -1545,36 +1699,103 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 		return output.String(), err
 	}
 
+	// Determine datasets to sync once, up front, so both the capacity check
+	// and the sync stage itself work from the same list.
+	var datasetsToSync []string
+	if strings.Contains(remoteDataset, "/") {
+		// Specific dataset given (e.g., NIXROOT/home) - sync just this one
+		datasetsToSync = []string{remoteDataset}
+	} else {
+		// Pool name given - discover all child datasets via SSH
+		children, err := getRemoteChildDatasets(remoteHost, remotePool)
+		if err != nil {
+			output.WriteString(fmt.Sprintf("Warning: Could not discover remote datasets: %v\n", err))
+			output.WriteString("Falling back to syncing pool root dataset\n")
+			datasetsToSync = []string{remoteDataset}
+		} else {
+			for _, child := range children {
+				datasetsToSync = append(datasetsToSync, fmt.Sprintf("%s/%s", remotePool, child))
+			}
+		}
+	}
+	dsNames := make([]string, len(datasetsToSync))
+	for i, ds := range datasetsToSync {
+		dsNames[i] = ds
+		if idx := strings.Index(ds, "/"); idx >= 0 {
+			dsNames[i] = ds[idx+1:]
+		}
+	}
+
+	// Stage 4: Check the backup disk has room for this run before pulling
+	// anything. The source is remote, so sizing dry-runs over SSH.
+	err = executeStage(StageCheckCapacity, "📦 Checking backup disk capacity", func() error {
+		output.WriteString("-----------------------------------------------------------\n")
+		output.WriteString("CAPACITY CHECK\n")
+		output.WriteString("   Estimating how much this run needs to pull, and comparing it\n")
+		output.WriteString("   against the free space on the backup disk, before any data\n")
+		output.WriteString("   starts moving.\n")
+		output.WriteString("-----------------------------------------------------------\n\n")
+
+		if len(datasetsToSync) == 0 {
+			output.WriteString("[OK] No datasets to pull - nothing to size.\n")
+			return nil
+		}
+
+		requirements := make([]datasetRequirement, 0, len(datasetsToSync))
+		for i, ds := range datasetsToSync {
+			suffix := dsNames[i]
+			syncDest := getHostnameDatasetPath(destPool, hostname, suffix)
+			need := estimateDatasetSendBytes(ctx, sshRunner{host: remoteHost}, ds, getRemoteSnapshotsForDataset(remoteHost, ds),
+				func() map[string]bool { return listDestSnapshotTags(syncDest) })
+			requirements = append(requirements, datasetRequirement{Dataset: suffix, RequiredBytes: need})
+		}
+
+		check := checkBackupCapacity(ctx, defaultRunner, destPool, requirements)
+		output.WriteString(fmt.Sprintf("Estimated requirement: %s\n", formatSize(check.RequiredBytes)))
+		if check.AvailableKnown {
+			output.WriteString(fmt.Sprintf("Free on %s: %s\n", destPool, formatSize(check.AvailableBytes)))
+		}
+
+		if check.Sufficient() {
+			output.WriteString("[OK] Enough free space for this run.\n")
+			return nil
+		}
+
+		output.WriteString("Not enough free space - pruning the backup disk under the retention policy first...\n")
+		destSuffixes := make([]string, len(dsNames))
+		copy(destSuffixes, dsNames)
+		destinations := backupDestinations(destPool, hostname, destSuffixes)
+		writePruneResult(&output, pruneDestinationSnapshots(ctx, defaultRunner, destinations, defaultRetentionPolicy, time.Now()))
+
+		recheck := checkBackupCapacity(ctx, defaultRunner, destPool, requirements)
+		var reclaimed int64
+		if check.AvailableKnown && recheck.AvailableKnown && recheck.AvailableBytes > check.AvailableBytes {
+			reclaimed = recheck.AvailableBytes - check.AvailableBytes
+		}
+
+		if recheck.Sufficient() {
+			output.WriteString(fmt.Sprintf("[OK] Pruning freed %s - enough room now.\n", formatSize(reclaimed)))
+			return nil
+		}
+
+		output.WriteString("\n" + capacityAdvisory(recheck, reclaimed))
+		return fmt.Errorf("not enough free space on %s for this backup: %s", destPool, capacityShortfallSummary(recheck))
+	})
+	if err != nil {
+		return output.String(), err
+	}
+
 	// Datasets whose replication failed, reported at the end of the run.
 	var failedDatasets []string
 	failedReasons := map[string]string{}
 
-	// Stage 4: Remote sync via syncoid (all datasets)
+	// Stage 5: Remote sync via syncoid (all datasets)
 	err = executeStage(StageSyncData, "Syncing data from remote host", func() error {
 		output.WriteString("-----------------------------------------------------------\n")
 		output.WriteString("REMOTE SYNC (using syncoid via SSH)\n")
 		output.WriteString("   Pulling data from remote host using syncoid over SSH.\n")
 		output.WriteString("   Only changes since the last backup are transferred.\n")
 		output.WriteString("-----------------------------------------------------------\n\n")
-
-		// Determine datasets to sync
-		var datasetsToSync []string
-		if strings.Contains(remoteDataset, "/") {
-			// Specific dataset given (e.g., NIXROOT/home) - sync just this one
-			datasetsToSync = []string{remoteDataset}
-		} else {
-			// Pool name given - discover all child datasets via SSH
-			children, err := getRemoteChildDatasets(remoteHost, remotePool)
-			if err != nil {
-				output.WriteString(fmt.Sprintf("Warning: Could not discover remote datasets: %v\n", err))
-				output.WriteString("Falling back to syncing pool root dataset\n")
-				datasetsToSync = []string{remoteDataset}
-			} else {
-				for _, child := range children {
-					datasetsToSync = append(datasetsToSync, fmt.Sprintf("%s/%s", remotePool, child))
-				}
-			}
-		}
 
 		if len(datasetsToSync) == 0 {
 			output.WriteString("Warning: No datasets found to sync\n")
@@ -1583,14 +1804,6 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 
 		output.WriteString(fmt.Sprintf("Syncing %d dataset(s) from %s\n\n", len(datasetsToSync), remoteHost))
 
-		// Extract display names for dataset progress
-		dsNames := make([]string, len(datasetsToSync))
-		for i, ds := range datasetsToSync {
-			dsNames[i] = ds
-			if idx := strings.Index(ds, "/"); idx >= 0 {
-				dsNames[i] = ds[idx+1:]
-			}
-		}
 		dsProgress := initDatasetProgress(dsNames)
 		for i, ds := range datasetsToSync {
 			snapInfos := getRemoteSnapshotsForDataset(remoteHost, ds)
@@ -1635,8 +1848,11 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 
 			syncErr := trackSyncProgress(
 				ctx,
-				dsProgress[i].Snapshots,
+				sshRunner{host: remoteHost},
+				ds,
+				&dsProgress[i],
 				func() map[string]bool { return listDestSnapshotTags(syncDest) },
+				func() (int64, bool) { return datasetUsedBytes(ctx, defaultRunner, syncDest) },
 				func() {
 					sendDatasetProgress(progressChan, fmt.Sprintf("Syncing %s", suffix), currentStage-1, totalStages, state, dsProgress, i)
 				},
@@ -1645,7 +1861,9 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 					// snapshot the remote ourselves, so syncoid's own sync
 					// snapshot is the only guaranteed replication base for a
 					// remote that has no snapshot policy of its own.
-					return runSyncoidWithTimeout(ctx, syncoidTimeout, "--create-bookmark", syncSrc, syncDest)
+					return runSyncoidWithResumeRecovery(ctx, syncoidTimeout, []string{"--create-bookmark", syncSrc, syncDest},
+						func(ctx context.Context) error { return defaultRunner.Run(ctx, "zfs", "receive", "-A", syncDest) },
+						&output)
 				},
 			)
 			if syncErr != nil {
@@ -1666,7 +1884,7 @@ func performRemoteBackup(ctx context.Context, password, remoteHost, remoteDatase
 		return output.String(), err
 	}
 
-	// Stage 5: Export and power off
+	// Stage 6: Export and power off
 	err = executeStage(StageExportPool, "Exporting pool and powering off", func() error {
 		output.WriteString("-----------------------------------------------------------\n")
 		output.WriteString("EXPORT & POWER OFF\n")
@@ -1745,7 +1963,7 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 		return "", fmt.Errorf("failed to save state: %w", err)
 	}
 
-	totalStages := 3
+	totalStages := 4
 	currentStage := 1
 
 	sendProgress := func(stage string, stageEnum BackupStage) error {
@@ -1819,11 +2037,67 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 		return output.String(), err
 	}
 
+	// Stage 2: Check the remote backup disk has room for this run before
+	// pushing anything. Both source and destination sizing run over the
+	// commandRunner abstraction, so the estimate is identical in shape to the
+	// local-destination flows - only the runner backing the destination side
+	// changes, from a local exec to SSH.
+	err = executeStage(StageCheckCapacity, "📦 Checking backup disk capacity", func() error {
+		output.WriteString("-----------------------------------------------------------\n")
+		output.WriteString("CAPACITY CHECK\n")
+		output.WriteString("   Estimating how much this run needs to push, and comparing it\n")
+		output.WriteString("   against the free space on the remote backup disk, before any\n")
+		output.WriteString("   data starts moving.\n")
+		output.WriteString("-----------------------------------------------------------\n\n")
+
+		remoteRunner := sshRunner{host: remoteHost}
+		requirements := make([]datasetRequirement, 0, len(datasets))
+		for _, ds := range datasets {
+			fullDS := fmt.Sprintf("%s/%s", sourcePool, ds)
+			remoteDatasetPath := fmt.Sprintf("%s/%s/%s", remoteDestPool, hostname, ds)
+			need := estimateDatasetSendBytes(ctx, defaultRunner, fullDS, getSnapshotsForDataset(fullDS),
+				func() map[string]bool { return listRemoteDestSnapshotTags(remoteHost, remoteDatasetPath) })
+			requirements = append(requirements, datasetRequirement{Dataset: ds, RequiredBytes: need})
+		}
+
+		check := checkBackupCapacity(ctx, remoteRunner, remoteDestPool, requirements)
+		output.WriteString(fmt.Sprintf("Estimated requirement: %s\n", formatSize(check.RequiredBytes)))
+		if check.AvailableKnown {
+			output.WriteString(fmt.Sprintf("Free on %s:%s: %s\n", remoteHost, remoteDestPool, formatSize(check.AvailableBytes)))
+		}
+
+		if check.Sufficient() {
+			output.WriteString("[OK] Enough free space for this run.\n")
+			return nil
+		}
+
+		output.WriteString("Not enough free space - pruning the remote backup disk under the retention policy first...\n")
+		destinations := backupDestinations(remoteDestPool, hostname, datasets)
+		writePruneResult(&output, pruneDestinationSnapshots(ctx, remoteRunner, destinations, defaultRetentionPolicy, time.Now()))
+
+		recheck := checkBackupCapacity(ctx, remoteRunner, remoteDestPool, requirements)
+		var reclaimed int64
+		if check.AvailableKnown && recheck.AvailableKnown && recheck.AvailableBytes > check.AvailableBytes {
+			reclaimed = recheck.AvailableBytes - check.AvailableBytes
+		}
+
+		if recheck.Sufficient() {
+			output.WriteString(fmt.Sprintf("[OK] Pruning freed %s - enough room now.\n", formatSize(reclaimed)))
+			return nil
+		}
+
+		output.WriteString("\n" + capacityAdvisory(recheck, reclaimed))
+		return fmt.Errorf("not enough free space on %s:%s for this backup: %s", remoteHost, remoteDestPool, capacityShortfallSummary(recheck))
+	})
+	if err != nil {
+		return output.String(), err
+	}
+
 	// Datasets whose replication failed, reported at the end of the run.
 	var failedDatasets []string
 	failedReasons := map[string]string{}
 
-	// Stage 2: Push the datasets in scope to the remote via syncoid
+	// Stage 3: Push the datasets in scope to the remote via syncoid
 	err = executeStage(StageSyncData, "Pushing data to remote host", func() error {
 		output.WriteString("-----------------------------------------------------------\n")
 		output.WriteString("PUSH SYNC (using syncoid via SSH)\n")
@@ -1865,13 +2139,20 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 
 			syncErr := trackSyncProgress(
 				ctx,
-				dsProgress[i].Snapshots,
+				defaultRunner,
+				syncSrc,
+				&dsProgress[i],
 				func() map[string]bool { return listRemoteDestSnapshotTags(remoteHost, remoteDatasetPath) },
+				func() (int64, bool) { return datasetUsedBytes(ctx, sshRunner{host: remoteHost}, remoteDatasetPath) },
 				func() {
 					sendDatasetProgress(progressChan, fmt.Sprintf("Pushing %s", ds), currentStage-1, totalStages, state, dsProgress, i)
 				},
 				func() error {
-					return runSyncoidWithTimeout(ctx, syncoidTimeoutFor(ctx, defaultRunner, syncSrc), syncoidBaseArgs(syncSrc, remoteDest)...)
+					return runSyncoidWithResumeRecovery(ctx, syncoidTimeoutFor(ctx, defaultRunner, syncSrc), syncoidBaseArgs(syncSrc, remoteDest),
+						func(ctx context.Context) error {
+							return runCommandWithContext(ctx, "ssh", remoteHost, "zfs", "receive", "-A", remoteDatasetPath)
+						},
+						&output)
 				},
 			)
 			if syncErr != nil {
@@ -1894,14 +2175,14 @@ func performPushBackup(ctx context.Context, password, sourcePool, remoteHost, re
 		return output.String(), err
 	}
 
-	// Stage 3: Prune local snapshots
+	// Stage 4: Prune local snapshots
 	err = executeStage(StagePruneLocal, "Pruning local snapshots", func() error {
 		output.WriteString("-----------------------------------------------------------\n")
 		output.WriteString("PRUNE LOCAL SNAPSHOTS\n")
 		output.WriteString("   Cleaning up old local snapshots to save space.\n")
 		output.WriteString("-----------------------------------------------------------\n\n")
 
-		writePruneResult(&output, pruneLocalSnapshots(ctx, defaultRunner, sourcePool, datasets, localBackupSnapshotsKept))
+		writePruneResult(&output, pruneLocalSnapshots(ctx, defaultRunner, sourcePool, datasets, defaultRetentionPolicy, time.Now()))
 		return nil
 	})
 	if err != nil {
@@ -2198,28 +2479,57 @@ func applySnapshotProgress(dots []SnapshotDot, present map[string]bool, inFlight
 	}
 }
 
-// trackSyncProgress wraps a sync operation with live per-snapshot progress
-// tracking. While syncFn runs, a background goroutine polls the destination
-// every ~2s via listDest. Snapshots that have arrived are marked SnapDone,
-// the next still-missing one is marked SnapSyncing, and the rest stay
-// SnapPending. After syncFn returns, the dots are reconciled one last time
-// against the destination: on success every missing tag is forced to SnapDone
-// (in case the poll race missed the final snapshot), and on failure the next
-// missing tag is marked SnapError so the user can see exactly where the chain
-// broke. report is invoked after each update so the UI redraws.
+// trackSyncProgress wraps a sync operation with live per-snapshot and
+// per-byte progress tracking. While syncFn runs, a background goroutine
+// polls the destination every ~2s via listDest. Snapshots that have arrived
+// are marked SnapDone, the next still-missing one is marked SnapSyncing, and
+// the rest stay SnapPending. After syncFn returns, the dots are reconciled
+// one last time against the destination: on success every missing tag is
+// forced to SnapDone (in case the poll race missed the final snapshot), and
+// on failure the next missing tag is marked SnapError so the user can see
+// exactly where the chain broke. report is invoked after each update so the
+// UI redraws.
+//
+// The same poll tick also samples getUsedBytes (bytes received at the
+// destination) and feeds ds.SentBytes/Rate/ETA. A dataset can have a single
+// outstanding snapshot that takes hours to send - without this, the dot
+// matrix shows one unchanging "syncing" dot for the whole transfer. ds.EstBytes
+// is filled in once up front from a `zfs send -nP` dry run (falling back to
+// fallbackBytes, typically the dataset's total `used`, when no dry-run
+// estimate is available), so byte progress can show a real percentage and
+// ETA rather than just a raw counter.
 //
 // The poller and the post-sync reconciliation run in separate goroutines that
-// are serialised via cancel/wait, so only one goroutine writes to dots at any
+// are serialised via cancel/wait, so only one goroutine writes to ds at any
 // given time.
 func trackSyncProgress(
 	ctx context.Context,
-	dots []SnapshotDot,
+	r commandRunner,
+	sourceDataset string,
+	ds *DatasetProgress,
 	listDest func() map[string]bool,
+	getUsedBytes func() (int64, bool),
 	report func(),
 	syncFn func() error,
 ) error {
+	dots := ds.Snapshots
 	applySnapshotProgress(dots, listDest(), true)
+
+	fallbackBytes, _ := datasetUsedBytes(ctx, r, sourceDataset)
+	ds.EstBytes = estimateSendBytes(ctx, r, sourceDataset, dots, fallbackBytes)
+
+	startBytes, haveStart := getUsedBytes()
+	startTime := time.Now()
 	report()
+
+	sampleBytes := func() {
+		if !haveStart {
+			return
+		}
+		if cur, ok := getUsedBytes(); ok {
+			updateByteProgress(ds, startBytes, cur, startTime)
+		}
+	}
 
 	pollCtx, cancel := context.WithCancel(ctx)
 	pollDone := make(chan struct{})
@@ -2233,6 +2543,7 @@ func trackSyncProgress(
 				return
 			case <-ticker.C:
 				applySnapshotProgress(dots, listDest(), true)
+				sampleBytes()
 				report()
 			}
 		}
@@ -2248,6 +2559,11 @@ func trackSyncProgress(
 		for i := range dots {
 			dots[i].Status = SnapDone
 		}
+		sampleBytes()
+		if ds.EstBytes > 0 && ds.SentBytes < ds.EstBytes {
+			ds.SentBytes = ds.EstBytes
+		}
+		ds.ETA = 0
 	} else {
 		applySnapshotProgress(dots, final, false)
 		foundFirstMissing := false
@@ -2266,6 +2582,125 @@ func trackSyncProgress(
 	}
 	report()
 	return syncErr
+}
+
+// datasetUsedBytes returns a dataset's `used` property in bytes. ok is false
+// if the dataset does not exist yet or the value could not be parsed.
+func datasetUsedBytes(ctx context.Context, r commandRunner, dataset string) (int64, bool) {
+	out, err := r.Output(ctx, "zfs", "get", "-H", "-p", "-o", "value", "used", dataset)
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// parseZfsSendSize extracts the estimated stream size from `zfs send -nP`
+// output, e.g. a line reading "size\t1234567890".
+func parseZfsSendSize(out string) int64 {
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "size" {
+			if n, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// estimateSendBytes sizes the transfer trackSyncProgress is about to run, so
+// the UI can show a real percentage and ETA. It uses a `zfs send -nP` dry run
+// over exactly the snapshots syncoid is about to send: from dots, the last
+// one already marked SnapDone (the incremental base) to the newest one still
+// missing. If there is no common base yet (first-ever full send) or the dry
+// run fails for any reason, fallbackBytes is returned instead - typically the
+// source dataset's total `used`, which is a poor estimate for an incremental
+// but still lets progress show *something* moving rather than nothing at all.
+func estimateSendBytes(ctx context.Context, r commandRunner, sourceDataset string, dots []SnapshotDot, fallbackBytes int64) int64 {
+	baseTag := ""
+	newestMissingTag := ""
+	for _, d := range dots {
+		if d.Status == SnapDone {
+			baseTag = d.Tag
+			continue
+		}
+		newestMissingTag = d.Tag
+	}
+	if newestMissingTag == "" {
+		return 0
+	}
+
+	var out string
+	var err error
+	if baseTag == "" {
+		out, err = r.Output(ctx, "zfs", "send", "-nP", fmt.Sprintf("%s@%s", sourceDataset, newestMissingTag))
+	} else {
+		out, err = r.Output(ctx, "zfs", "send", "-nP", "-I",
+			fmt.Sprintf("%s@%s", sourceDataset, baseTag),
+			fmt.Sprintf("%s@%s", sourceDataset, newestMissingTag))
+	}
+	if err != nil {
+		return fallbackBytes
+	}
+	if n := parseZfsSendSize(out); n > 0 {
+		return n
+	}
+	return fallbackBytes
+}
+
+// updateByteProgress recomputes ds.SentBytes/Rate/ETA from a fresh sample of
+// bytes received at the destination.
+func updateByteProgress(ds *DatasetProgress, startBytes, current int64, startTime time.Time) {
+	delta := current - startBytes
+	if delta < 0 {
+		delta = 0
+	}
+	ds.SentBytes = delta
+
+	elapsed := time.Since(startTime).Seconds()
+	if elapsed <= 0 {
+		return
+	}
+	ds.Rate = float64(delta) / elapsed
+
+	if ds.EstBytes > 0 && ds.Rate > 0 {
+		remaining := ds.EstBytes - delta
+		if remaining < 0 {
+			remaining = 0
+		}
+		ds.ETA = time.Duration(float64(remaining)/ds.Rate) * time.Second
+	}
+}
+
+// datasetProgressSummary renders a dataset's live byte-transfer progress as a
+// single line, e.g. "1.2 GB / 4.5 GB (26%) - 12.3 MB/s - ETA 8m 12s". Falls
+// back to whatever is known when the total size or rate isn't available yet,
+// and returns "" once nothing has been transferred yet.
+func datasetProgressSummary(d DatasetProgress) string {
+	if d.SentBytes <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	if d.EstBytes > 0 {
+		pct := float64(d.SentBytes) / float64(d.EstBytes) * 100
+		if pct > 100 {
+			pct = 100
+		}
+		fmt.Fprintf(&b, "%s / %s (%.0f%%)", formatSize(d.SentBytes), formatSize(d.EstBytes), pct)
+	} else {
+		fmt.Fprintf(&b, "%s transferred", formatSize(d.SentBytes))
+	}
+	if d.Rate > 0 {
+		fmt.Fprintf(&b, " - %s/s", formatSize(int64(d.Rate)))
+	}
+	if d.ETA > 0 {
+		fmt.Fprintf(&b, " - ETA %s", formatDuration(d.ETA))
+	}
+	return b.String()
 }
 
 // layoutRename is one pending legacy-layout move.
@@ -2536,12 +2971,8 @@ const syncoidSeedRate = 10 * 1024 * 1024 // bytes per second
 // before the finish line; a deadline the dataset cannot legitimately exceed
 // keeps the timeout meaning "stuck", not "large".
 func syncoidTimeoutFor(ctx context.Context, r commandRunner, dataset string) time.Duration {
-	out, err := r.Output(ctx, "zfs", "get", "-H", "-p", "-o", "value", "used", dataset)
-	if err != nil {
-		return syncoidTimeout
-	}
-	usedBytes, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
-	if err != nil || usedBytes <= 0 {
+	usedBytes, ok := datasetUsedBytes(ctx, r, dataset)
+	if !ok || usedBytes <= 0 {
 		return syncoidTimeout
 	}
 	timeout := time.Duration(usedBytes/syncoidSeedRate)*time.Second + time.Hour
@@ -2549,6 +2980,40 @@ func syncoidTimeoutFor(ctx context.Context, r commandRunner, dataset string) tim
 		return syncoidTimeout
 	}
 	return timeout
+}
+
+// isStaleResumeTokenError reports whether syncoid failed because the
+// destination's partial-receive resume token points at a source snapshot
+// that no longer exists - e.g. sanoid rotated the snapshot away while a send
+// sat stalled for hours. The token is now permanently unusable: zfs refuses
+// to resume from a snapshot it cannot find, and nothing will change that on
+// a later retry, so the only way forward is to clear it and start over from
+// whatever common snapshot or bookmark remains.
+func isStaleResumeTokenError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "cannot resume send") && strings.Contains(msg, "no longer exists")
+}
+
+// runSyncoidWithResumeRecovery runs syncoid and, if it fails because the
+// destination's resume token references a source snapshot that no longer
+// exists, aborts the stale partial receive (zfs receive -A, via abortResume)
+// and retries once with a fresh incremental base - a snapshot or, failing
+// that, the bookmark --create-bookmark left behind on a previous run.
+func runSyncoidWithResumeRecovery(ctx context.Context, timeout time.Duration, args []string, abortResume func(context.Context) error, output *strings.Builder) error {
+	err := runSyncoidWithTimeout(ctx, timeout, args...)
+	if !isStaleResumeTokenError(err) {
+		return err
+	}
+
+	output.WriteString("The destination's resume token points at a source snapshot that no longer exists (likely rotated away while the previous send was stalled) - clearing it and retrying from the latest common snapshot/bookmark\n")
+	if abortErr := abortResume(ctx); abortErr != nil {
+		return fmt.Errorf("%w (also failed to clear the stale resume token: %v)", err, abortErr)
+	}
+
+	return runSyncoidWithTimeout(ctx, timeout, args...)
 }
 
 // runSyncoidWithTimeout runs syncoid with a per-dataset timeout to prevent infinite hangs.

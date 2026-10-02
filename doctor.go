@@ -207,6 +207,24 @@ func snapshotHasClones(ctx context.Context, r commandRunner, snapshot string) bo
 	return value != "" && value != "-"
 }
 
+// snapshotDestroySafety runs the mandatory pre-destroy checks shared by every
+// destructive snapshot tool in zfs-backup: never touch a protected snapshot,
+// a held snapshot, or one with dependent clones. Callers that build their own
+// decision type (destroyDecision, sourcePruneDecision, ...) fold this in
+// rather than repeat the switch.
+func snapshotDestroySafety(ctx context.Context, r commandRunner, tag, name string) (safe bool, skipReason string) {
+	switch {
+	case isProtectedSnapshotTag(tag):
+		return false, "protected snapshot"
+	case snapshotHasHolds(ctx, r, name):
+		return false, "snapshot has a hold"
+	case snapshotHasClones(ctx, r, name):
+		return false, "snapshot has dependent clones"
+	default:
+		return true, ""
+	}
+}
+
 // destroyDecision records whether one orphan may be destroyed.
 type destroyDecision struct {
 	Orphan     orphanSnapshot
@@ -220,16 +238,8 @@ type destroyDecision struct {
 func vetOrphans(ctx context.Context, r commandRunner, orphans []orphanSnapshot) []destroyDecision {
 	decisions := make([]destroyDecision, 0, len(orphans))
 	for _, o := range orphans {
-		switch {
-		case isProtectedSnapshotTag(o.Tag):
-			decisions = append(decisions, destroyDecision{Orphan: o, SkipReason: "protected snapshot"})
-		case snapshotHasHolds(ctx, r, o.Name):
-			decisions = append(decisions, destroyDecision{Orphan: o, SkipReason: "snapshot has a hold"})
-		case snapshotHasClones(ctx, r, o.Name):
-			decisions = append(decisions, destroyDecision{Orphan: o, SkipReason: "snapshot has dependent clones"})
-		default:
-			decisions = append(decisions, destroyDecision{Orphan: o, Safe: true})
-		}
+		safe, reason := snapshotDestroySafety(ctx, r, o.Tag, o.Name)
+		decisions = append(decisions, destroyDecision{Orphan: o, Safe: safe, SkipReason: reason})
 	}
 	return decisions
 }

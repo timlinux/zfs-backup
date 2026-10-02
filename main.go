@@ -377,6 +377,8 @@ func (m model) getStatusText() string {
 		return "Backup Browser"
 	case stateCleanup:
 		return "Cleanup"
+	case statePruneSnapshots:
+		return "Prune Snapshots"
 	case stateRecoverPool:
 		return "Pool Recovery"
 	case stateDevicePick:
@@ -431,6 +433,8 @@ func (m model) getHotkeys() string {
 		return "scroll up/down • c clean up • r refresh • esc return"
 	case stateCleanup:
 		return m.cleanupHotkeys()
+	case statePruneSnapshots:
+		return m.prunePlanHotkeys()
 	case stateBrowse:
 		return m.browseHotkeys()
 	case stateRecoverPool:
@@ -573,6 +577,18 @@ type model struct {
 	cleanupDestroyTotal    int            // Snapshots the destroy run will touch
 	cleanupDestroyDone     int            // Snapshots destroyed so far
 	cleanupDestroyProgress chan struct{}  // Ticks from the destroy loop
+	// Source-pool retention prune (prune-snapshots)
+	sourcePrunePool            string           // Pool being pruned
+	sourcePrunePlan            *sourcePrunePlan // Vetted dry run - what would be destroyed
+	sourcePruneViewport        viewport.Model   // Scrollable plan / result body
+	sourcePruneReady           bool             // Is the plan ready?
+	sourcePrunePhase           cleanupPhase     // Plan, confirm, running or done (shared enum with orphan cleanup)
+	sourcePruneOutcome         cleanupOutcome   // What the destroy run actually did
+	sourcePruneMessage         string           // Inline validation / abort message
+	sourcePrunePlanBody        string           // Rendered dry-run body, restored after esc from confirm
+	sourcePruneDestroyTotal    int              // Snapshots the destroy run will touch
+	sourcePruneDestroyDone     int              // Snapshots destroyed so far
+	sourcePruneDestroyProgress chan struct{}    // Ticks from the destroy loop
 	// Guided pool recovery
 	recoverPool     string         // Pool being recovered
 	recoverHealth   poolHealth     // Latest diagnosis
@@ -1294,11 +1310,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 						// Backup scope and the health check act on the source
 						// pool alone, so there is no destination to pick.
-						if m.operation == "scope" || m.operation == "doctor" || m.operation == "cleanup" {
+						if m.operation == "scope" || m.operation == "doctor" || m.operation == "cleanup" || m.operation == "prune-snapshots" {
 							m.selectingPool = false
 							m.scopePool = selectedPool
 							m.doctorPool = selectedPool
 							m.cleanupPool = selectedPool
+							m.sourcePrunePool = selectedPool
 							return m, m.preparePoolAccess(selectedPool)
 						}
 
@@ -1339,6 +1356,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.doctorPool = selectedPool
 						case "cleanup":
 							m.cleanupPool = selectedPool
+						case "prune-snapshots":
+							m.sourcePrunePool = selectedPool
 						case "browse":
 							m.browseSrcPool = m.sourcePool
 							m.browseDestPool = selectedPool
@@ -1574,6 +1593,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.operation = "cleanup"
 					m.startPoolSelection(true)
 					return m, nil
+				case "Prune Historic Snapshots":
+					m.operation = "prune-snapshots"
+					m.startPoolSelection(true)
+					return m, nil
 				case "Backup Health Check":
 					m.operation = "doctor"
 					m.startPoolSelection(true)
@@ -1698,6 +1721,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, m.unlockAndLoadQuotas()
 					case "cleanup":
 						return m, m.unlockAndLoadCleanupPlan()
+					case "prune-snapshots":
+						return m, m.unlockAndLoadSourcePrunePlan()
 					case "doctor":
 						return m, m.unlockAndLoadDoctorReport()
 					case "scope":
@@ -1806,6 +1831,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateDoctorScreen(msg)
 		} else if m.state == stateCleanup {
 			return m.updateCleanupScreen(msg)
+		} else if m.state == statePruneSnapshots {
+			return m.updatePruneSnapshotsScreen(msg)
 		} else if m.state == stateRecoverPool {
 			return m.updateRecoverPoolScreen(msg)
 		} else if m.state == stateDevicePick {
@@ -2065,9 +2092,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case tickMsg:
-		// Update ETA periodically
+		// Update ETA periodically. While a dataset is actively syncing, its
+		// own byte-progress ETA (refreshed every poll tick in
+		// progressUpdateMsg) is far more accurate than the per-stage average
+		// below, so leave it alone rather than clobbering it with a number
+		// based on stages that took seconds while this one takes hours.
 		if m.state == stateRunning && m.backupState != nil {
-			m.eta = m.backupState.EstimateTimeRemaining(m.totalStages)
+			liveETA := m.currentDataset >= 0 &&
+				m.currentDataset < len(m.datasetProgress) &&
+				m.datasetProgress[m.currentDataset].ETA > 0
+			if !liveETA {
+				m.eta = m.backupState.EstimateTimeRemaining(m.totalStages)
+			}
 		}
 		return m, tickEvery()
 
@@ -2130,6 +2166,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cleanupPhase = cleanupPhasePlan
 			m.cleanupMessage = ""
 			return m, tea.Batch(m.spinner.Tick, loadCleanupPlan(m.cleanupPool))
+		case "prune-snapshots":
+			m.state = statePruneSnapshots
+			m.sourcePruneReady = false
+			m.sourcePrunePhase = cleanupPhasePlan
+			m.sourcePruneMessage = ""
+			return m, tea.Batch(m.spinner.Tick, loadSourcePrunePlan(m.sourcePrunePool))
 		case "browse":
 			m.state = stateBrowse
 			m.browseReady = false
@@ -2320,6 +2362,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cleanupViewport = newReportViewport(m.width, m.height,
 			buildCleanupResultView(m.cleanupPool, msg.outcome, msg.usage))
 		m.cleanupReady = true
+
+	case sourcePrunePlanMsg:
+		if msg.err != nil {
+			m.state = stateResult
+			m.err = msg.err
+			m.message = ""
+			return m, nil
+		}
+		m.state = statePruneSnapshots
+		m.sourcePrunePool = msg.pool
+		m.sourcePrunePlan = msg.plan
+		m.sourcePrunePhase = cleanupPhasePlan
+		m.sourcePrunePlanBody = buildPrunePlanView(msg.plan, msg.preview)
+		m.sourcePruneViewport = newReportViewport(m.width, m.height, m.sourcePrunePlanBody)
+		m.sourcePruneReady = true
+		return m, nil
+
+	case sourcePruneDestroyProgressMsg:
+		m.sourcePruneDestroyDone++
+		if m.sourcePruneDestroyProgress == nil {
+			return m, nil
+		}
+		return m, listenSourcePruneDestroyProgress(m.sourcePruneDestroyProgress)
+
+	case sourcePruneDoneMsg:
+		m.sourcePruneOutcome = msg.outcome
+		m.sourcePrunePhase = cleanupPhaseDone
+		m.sourcePruneDestroyProgress = nil
+		m.sourcePruneViewport = newReportViewport(m.width, m.height,
+			buildPruneResultView(m.sourcePrunePool, msg.outcome, msg.usage))
+		m.sourcePruneReady = true
 
 	case maintenanceStatusMsg:
 		if msg.err != nil {
@@ -2651,6 +2724,8 @@ func (m model) renderContentNopad(width int) string {
 		content.WriteString(m.renderDoctorContent(width))
 	case stateCleanup:
 		content.WriteString(m.renderCleanupContent(width))
+	case statePruneSnapshots:
+		content.WriteString(m.renderPruneSnapshotsContent(width))
 	case stateBrowse:
 		content.WriteString(m.renderBrowseContent(width))
 	case stateRecoverPool:
@@ -3144,6 +3219,19 @@ func (m model) renderDatasetGrid(width int) string {
 			Align(lipgloss.Center).
 			Render(row)
 		b.WriteString(line + "\n")
+
+		// Live byte progress for the currently syncing dataset - without
+		// this, a dataset with only one outstanding snapshot shows nothing
+		// moving for the entire (possibly multi-hour) transfer.
+		if i == m.currentDataset && ds.Status == DatasetSyncing {
+			if summary := datasetProgressSummary(ds); summary != "" {
+				progLine := lipgloss.NewStyle().
+					Width(width).
+					Align(lipgloss.Center).
+					Render(labelActive.Render(summary))
+				b.WriteString(progLine + "\n")
+			}
+		}
 
 		// Show snapshot dot matrix for the currently syncing dataset
 		if i == m.currentDataset && len(ds.Snapshots) > 0 {
@@ -3891,6 +3979,20 @@ func (m model) unlockAndLoadCleanupPlan() tea.Cmd {
 	}
 }
 
+// unlockAndLoadSourcePrunePlan unlocks the pool and builds the source-pool
+// retention plan - see unlockAndLoadCleanupPlan for why this case must not
+// fall through to startOperation().
+func (m model) unlockAndLoadSourcePrunePlan() tea.Cmd {
+	pool := m.sourcePrunePool
+	password := m.password
+	return func() tea.Msg {
+		if err := loadPoolKey(pool, password); err != nil {
+			return sourcePrunePlanMsg{pool: pool, err: fmt.Errorf("failed to unlock pool: %w", err)}
+		}
+		return loadSourcePrunePlan(pool)()
+	}
+}
+
 // unlockAndLoadDoctorReport unlocks the pool and runs the health check - see
 // unlockAndLoadCleanupPlan for why this case must not fall through to
 // startOperation().
@@ -4593,6 +4695,8 @@ func handleCLI() {
 		os.Exit(handleDoctorCLI(rest))
 	case "cleanup-orphans":
 		os.Exit(handleCleanupCLI(rest))
+	case "prune-snapshots":
+		os.Exit(handlePruneSnapshotsCLI(rest))
 	case "scope":
 		os.Exit(handleScopeCLI(rest))
 	case "--version", "-v":
@@ -4681,6 +4785,29 @@ func handleCleanupCLI(args []string) int {
 		Force:   flags["force"] == "true",
 	}
 	return runCleanupOrphans(context.Background(), defaultRunner, opts, confirmDestroy)
+}
+
+// handlePruneSnapshotsCLI runs the source-side retention prune (zfs-backup's
+// own snapshots plus sanoid's autosnap_* snapshots, thinned to the
+// grandfather-father-son policy). Dry run is the default.
+func handlePruneSnapshotsCLI(args []string) int {
+	flags, err := parseFlags(args, map[string]bool{"pool": true})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		return 1
+	}
+	pool, err := resolveCLIPool(flags)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		return 1
+	}
+
+	opts := sourcePruneOptions{
+		Pool:    pool,
+		Confirm: flags["yes"] == "true",
+		Force:   flags["force"] == "true",
+	}
+	return runPruneSourceSnapshots(context.Background(), defaultRunner, opts, confirmDestroy)
 }
 
 // confirmDestroy asks the operator to type DESTROY before anything is removed.
@@ -4803,6 +4930,18 @@ Commands:
     --yes               Actually destroy (dry run is the default)
     --force             Skip the typed confirmation prompt
 
+  prune-snapshots       Thin the source pool's own history: zfs-backup's
+                        snapshots and sanoid's autosnap_* snapshots, kept
+                        one per day (7d), one per week (4w), one per month
+                        (12mo), one per year (forever). zfs-backup's own
+                        snapshots are bookmarked first, so incremental
+                        backups keep working; pruned sanoid snapshots are
+                        destroyed outright. sanoid itself and its own
+                        schedule are left untouched.
+    --pool POOL         Pool to prune (default: auto-detected source pool)
+    --yes               Actually prune (dry run is the default)
+    --force             Skip the typed confirmation prompt
+
 If no options are provided, an interactive TUI menu will be displayed.
 Scope, health and cleanup are all main-menu items too - no flags needed.
 
@@ -4813,6 +4952,8 @@ Examples:
   sudo zfs-backup doctor                            # Check for orphans
   sudo zfs-backup cleanup-orphans                   # Dry run the cleanup
   sudo zfs-backup cleanup-orphans --yes             # Destroy, after confirming
+  sudo zfs-backup prune-snapshots                   # Dry run the retention prune
+  sudo zfs-backup prune-snapshots --yes             # Prune, after confirming
 
 Snapshot scope: zfs-backup only ever snapshots the datasets it also
 replicates and prunes. Datasets outside the scope are never touched.

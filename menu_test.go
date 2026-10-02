@@ -137,7 +137,7 @@ func TestOperationNamesCoverEveryDispatchedOperation(t *testing.T) {
 	dispatched := []string{
 		"backup", "remote-backup", "push-backup", "force-backup", "prepare",
 		"zpoolinfo", "recover-pool", "maintenance", "quotas", "scope",
-		"browse", "cleanup", "doctor", "recover", "unmount",
+		"browse", "cleanup", "prune-snapshots", "doctor", "recover", "unmount",
 	}
 	for _, op := range dispatched {
 		if operationDisplayName(op) == op {

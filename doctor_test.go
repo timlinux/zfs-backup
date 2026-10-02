@@ -270,3 +270,130 @@ func TestUnsetScopeNoticeIsEmptyWhenConfigured(t *testing.T) {
 		t.Errorf("expected no notice, got %q", notice)
 	}
 }
+
+// =============================================================================
+// prune-snapshots (source-side retention)
+// =============================================================================
+
+// zfs-backup's own snapshots and sanoid's autosnap_* snapshots must be
+// retained on independent timelines: pruning one family must never depend on
+// what the other family happens to have on the same day. If they shared one
+// timeline, a sanoid snapshot a few minutes newer than zfs-backup's own could
+// knock the incremental base out of the "keep" set.
+func TestSourcePruneCandidatesForDatasetKeepsFamiliesIndependent(t *testing.T) {
+	entries := []snapshotEntry{
+		// Same day - if bucketed together, only one of these would survive.
+		snapshotFixtureAt("NIXROOT/home", "2026-08-14.10h-00-Backup", 1*time.Hour),
+		snapshotFixtureAt("NIXROOT/home", "autosnap_2026-08-14_09:00:00_hourly", 2*time.Hour),
+		// Foreign snapshots must never be candidates for anything.
+		snapshotFixture("NIXROOT/home", "syncoid_abyss_2026-08-10:00:49:53-GMT01:00", 4),
+		snapshotFixture("NIXROOT/home", "keep-me-please", 5),
+	}
+
+	candidates := sourcePruneCandidatesForDataset(entries, retentionReferenceTime, defaultRetentionPolicy)
+
+	if len(candidates) != 0 {
+		t.Fatalf("expected both same-day representatives to survive on their own timeline, got %+v", candidates)
+	}
+}
+
+func TestSourcePruneCandidatesForDatasetPrunesEachFamilyOnItsOwnSchedule(t *testing.T) {
+	entries := []snapshotEntry{
+		snapshotFixtureAt("NIXROOT/home", "2026-08-14.10h-00-Backup", 0),
+		snapshotFixtureAt("NIXROOT/home", "2026-08-14.04h-00-Backup", 6*time.Hour), // same day, loses to the above
+		snapshotFixtureAt("NIXROOT/home", "autosnap_2026-08-14_09:00:00_hourly", 1*time.Hour),
+		snapshotFixtureAt("NIXROOT/home", "autosnap_2026-08-14_03:00:00_hourly", 7*time.Hour), // same day, loses independently
+	}
+
+	candidates := sourcePruneCandidatesForDataset(entries, retentionReferenceTime, defaultRetentionPolicy)
+
+	if len(candidates) != 2 {
+		t.Fatalf("expected exactly one loser per family, got %d: %+v", len(candidates), candidates)
+	}
+	var own, sanoid int
+	for _, c := range candidates {
+		switch c.Kind {
+		case sourcePruneOwn:
+			own++
+			if c.Tag != "2026-08-14.04h-00-Backup" {
+				t.Errorf("expected the earlier zfs-backup snapshot to lose, got %q", c.Tag)
+			}
+		case sourcePruneSanoid:
+			sanoid++
+			if c.Tag != "autosnap_2026-08-14_03:00:00_hourly" {
+				t.Errorf("expected the earlier sanoid snapshot to lose, got %q", c.Tag)
+			}
+		}
+	}
+	if own != 1 || sanoid != 1 {
+		t.Errorf("expected one loser from each family, got own=%d sanoid=%d", own, sanoid)
+	}
+}
+
+func TestRenderSourcePrunePlanBreaksDownByKindAndExplainsSkips(t *testing.T) {
+	decision := func(name, dataset string, kind sourcePruneKind, safe bool, reason string) sourcePruneDecision {
+		_, tag, _ := splitSnapshot(name)
+		return sourcePruneDecision{
+			Candidate: sourcePruneCandidate{
+				snapshotEntry: snapshotEntry{Name: name, Dataset: dataset, Tag: tag, Used: 1024},
+				Kind:          kind,
+			},
+			Safe:       safe,
+			SkipReason: reason,
+		}
+	}
+
+	plan := &sourcePrunePlan{
+		Pool: "NIXROOT",
+		Decisions: []sourcePruneDecision{
+			decision("NIXROOT/home@2026-01-01.00h-00-Backup", "NIXROOT/home", sourcePruneOwn, true, ""),
+			decision("NIXROOT/home@autosnap_2026-01-01_00:00:00_hourly", "NIXROOT/home", sourcePruneSanoid, true, ""),
+			decision("NIXROOT/home@blank", "NIXROOT/home", sourcePruneSanoid, false, "protected snapshot"),
+		},
+	}
+
+	rendered := renderSourcePrunePlan(plan)
+
+	for _, want := range []string{"NIXROOT/home", "1 zfs-backup snapshot", "1 sanoid autosnap", "protected snapshot"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("rendered plan missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
+// The whole point of bucketing the two families separately in
+// destroySourcePruneCandidates: zfs-backup's own history must remain usable
+// as an incremental base (via a bookmark) after pruning, while sanoid's
+// snapshots - never used as a send base - are freed outright rather than
+// leaving a bookmark nothing will ever read.
+func TestDestroySourcePruneCandidatesBookmarksOwnButDestroysSanoidOutright(t *testing.T) {
+	r := &fakeRunner{respond: func(name string, args []string) (string, error) {
+		if len(args) > 0 && args[0] == "list" {
+			return args[len(args)-1] + "\n", nil // bookmark existence check
+		}
+		return "", nil
+	}}
+
+	targets := []sourcePruneCandidate{
+		{snapshotEntry: snapshotEntry{Name: "NIXROOT/home@2026-01-01.00h-00-Backup"}, Kind: sourcePruneOwn},
+		{snapshotEntry: snapshotEntry{Name: "NIXROOT/home@autosnap_2026-01-01_00:00:00_hourly"}, Kind: sourcePruneSanoid},
+	}
+
+	outcome := destroySourcePruneCandidates(context.Background(), r, targets, nil)
+
+	if len(outcome.Failures) != 0 {
+		t.Fatalf("unexpected failures: %v", outcome.Failures)
+	}
+	if len(outcome.Destroyed) != 2 {
+		t.Fatalf("expected both to be destroyed, got %d", len(outcome.Destroyed))
+	}
+	if !r.ran("zfs bookmark NIXROOT/home@2026-01-01.00h-00-Backup") {
+		t.Error("expected zfs-backup's own snapshot to be bookmarked before destruction")
+	}
+	if r.ran("zfs bookmark NIXROOT/home@autosnap_2026-01-01_00:00:00_hourly") {
+		t.Error("sanoid's snapshot should never be bookmarked - it is never an incremental base")
+	}
+	if !r.ran("zfs destroy NIXROOT/home@autosnap_2026-01-01_00:00:00_hourly") {
+		t.Error("expected sanoid's snapshot to be destroyed outright")
+	}
+}

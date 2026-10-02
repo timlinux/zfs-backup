@@ -147,6 +147,7 @@ const (
 	StageImportPool     BackupStage = "import_pool"
 	StageLoadKey        BackupStage = "load_key"
 	StageCreateSnapshot BackupStage = "create_snapshot"
+	StageCheckCapacity  BackupStage = "check_capacity"
 	StageSyncData       BackupStage = "sync_data"
 	StagePruneLocal     BackupStage = "prune_local"
 	StagePruneBackup    BackupStage = "prune_backup"
@@ -310,8 +311,9 @@ func (s *BackupState) EstimateTimeRemaining(totalStages int) time.Duration {
 // Every stage listed here must be idempotent and cheap: each already checks
 // the current state and does nothing when it is already satisfied.
 var revocableStages = map[BackupStage]bool{
-	StageImportPool: true,
-	StageLoadKey:    true,
+	StageImportPool:    true,
+	StageLoadKey:       true,
+	StageCheckCapacity: true, // free space and what is left to send both change between runs
 }
 
 // ShouldSkipStage reports whether a resumed run may skip a stage it has

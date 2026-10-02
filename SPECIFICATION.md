@@ -602,6 +602,10 @@ Subcommands:
 - `doctor [--pool POOL]`: read-only health check; exits 1 when issues are found
 - `cleanup-orphans [--pool POOL] [--dataset DS] [--yes] [--force]`: remove
   orphaned snapshots; dry run unless `--yes` is given
+- `prune-snapshots [--pool POOL] [--yes] [--force]`: thin zfs-backup's own
+  and sanoid's `autosnap_*` snapshots on datasets already in the backup
+  scope, under the grandfather-father-son retention policy (FR-011); dry
+  run unless `--yes` is given
 
 ### FR-010: Quota vs Refquota
 The health check and documentation must distinguish the two, because it
@@ -610,6 +614,37 @@ determines how a snapshot leak manifests:
   snapshots count against it, so the dataset eventually fails writes.
 - `refquota` limits only referenced (live) data. Orphaned snapshots instead eat
   pool free space silently.
+
+### FR-011: Retention Policy and Capacity Advisory
+- **Retention policy.** Both the destination pool's post-sync prune and the
+  `prune-snapshots` source-side tool apply the same grandfather-father-son
+  schedule: one snapshot kept per calendar day for the last 7 days, one per
+  ISO week for the last 4 weeks, one per calendar month for the last 12
+  months, and one per calendar year forever after that. The single newest
+  snapshot of a family is always kept regardless, since it is the
+  incremental base for the next run.
+- On the source pool, zfs-backup's own snapshots and sanoid's `autosnap_*`
+  snapshots are retained on **independent** timelines - pruning one family
+  is never influenced by what the other family happens to have on the same
+  day.
+- Snapshots the retention policy no longer wants kept are never simply
+  deleted when they could still serve as an incremental base: zfs-backup's
+  own snapshots (both destination-side and source-side) are converted to a
+  bookmark first, then destroyed. sanoid's `autosnap_*` snapshots are
+  destroyed outright when pruned by `prune-snapshots`, since zfs-backup
+  never uses them as a send base and a bookmark for one would never be
+  read.
+- **Capacity check.** Before the sync stage of every backup flow (backup,
+  force backup, pull, push) runs, the destination is pruned under the
+  retention policy to reclaim what it safely can, then every in-scope
+  dataset's transfer is sized with a `zfs send -nP` dry run (falling back
+  to the dataset's total `used` size when no incremental base exists yet)
+  and compared against the destination's actual free space.
+- If the estimated requirement exceeds what is free even after pruning,
+  the run stops before any data moves, with an advisory: total needed vs.
+  available, a per-dataset breakdown (largest first), and concrete next
+  steps (prune further, narrow the backup scope, use a bigger disk) -
+  never a mid-transfer failure with no actionable information.
 
 ## Non-Functional Requirements
 
@@ -626,6 +661,17 @@ determines how a snapshot leak manifests:
   - Summary line showing datasets synced count and error count
   - Inline error messages for failed datasets
   - Legend bar explaining dot colors
+  - Live byte-level progress for the currently syncing dataset: bytes sent,
+    estimated total (from a `zfs send -nP` dry run, falling back to the
+    dataset's total `used` when no dry-run estimate is available), transfer
+    rate, and a per-dataset ETA - refreshed every ~2s so a dataset with a
+    single outstanding snapshot still visibly moves during a multi-hour
+    transfer. While this ETA is available it supersedes the coarse
+    per-stage estimate ("Estimated time remaining") shown for the backup as
+    a whole, which is otherwise a poor fit for a single stage that runs for
+    hours while its siblings finish in seconds.
+  - Headless/CLI output narrates the same byte progress for the active
+    dataset, throttled to once every 30s
 
 ### NFR-002: Error Handling
 - Clear error messages displayed to user
@@ -634,6 +680,11 @@ determines how a snapshot leak manifests:
 - Destination datasets are pre-created before syncoid runs to prevent hangs when a new dataset appears on the source pool
 - Per-dataset syncoid timeout (4 hours) prevents a single stuck sync from blocking the entire backup
 - Remote destination datasets are created via SSH before push operations
+- If a destination's partial-receive resume token references a source
+  snapshot that no longer exists (e.g. rotated away by sanoid while a send
+  sat stalled for hours), the sync stage clears the stale token (`zfs
+  receive -A`) and retries once from the latest common snapshot or bookmark,
+  rather than failing the dataset outright
 
 ### NFR-003: Dependencies
 - Go with Bubble Tea, Bubbles, Lipgloss
@@ -684,6 +735,8 @@ sudo -E env "PATH=$PATH" go test -tags integration -run TestIntegration -v ./...
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.4.0 | 2026-09 | Backup lifecycle management: destination retention is now a proper grandfather-father-son schedule and runs before sync as well as after; pre-flight capacity check with a smart advisory stops a run before it starts if the destination plainly will not fit, instead of failing mid-transfer; new `prune-snapshots` subcommand thins the source pool's own and sanoid's `autosnap_*` history independently of sanoid's own schedule |
+| 2.3.0 | 2026-09 | Live byte-level progress and ETA during sync, replacing a per-dataset dot that could sit unchanged for hours; sync stage self-heals a stale partial-receive resume token (source snapshot rotated away mid-stall) instead of failing the dataset |
 | 2.1.0 | 2026-09 | Redesigned sectioned menu with safety badges and filtering; vetted disk picker and typed confirmations guard the destructive flows. Guided in-app pool recovery for a suspended pool; build commit shown beside the version. Fixed layout migration failing when a dataset shares the hostname's name, and blocked backing a pool up onto itself. Orphan cleanup moved into the TUI: a main-menu item and a `c` key on the health check screen, with a dry-run-first screen and typed `DESTROY` confirmation. CLI and TUI now share one cleanup implementation |
 | 2.0.0 | 2026-08 | **Breaking:** snapshot scope now equals replication scope - no more recursive pool snapshots. Per-pool backup scope selection, `doctor` and `cleanup-orphans` subcommands, pruning fixed to cover every dataset, `--no-sync-snap`, failed datasets exit non-zero |
 | 1.6.0 | 2026-06 | Per-snapshot progress tracking, automatic legacy layout migration, unmounted datasets included, Kartoza brand mkdocs theme |

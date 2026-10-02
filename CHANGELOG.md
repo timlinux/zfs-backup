@@ -9,6 +9,71 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-09-20
+
+### Added
+
+- **Backup lifecycle management.** The destination pool's retention policy
+  is now a proper grandfather-father-son schedule - one snapshot a day for
+  the last 7 days, one a week for the last 4 weeks, one a month for the
+  last 12 months, one a year forever - instead of the previous flat
+  "newest + last 3 months". It also now runs *before* the sync stage as
+  well as after: a backup that starts on a full disk reclaims what it
+  safely can first, rather than only tidying up once it has already
+  succeeded.
+- **Pre-flight capacity check with a smart advisory.** Before any data
+  moves, every sync stage (backup, force backup, pull, push) now sizes the
+  run with the same `zfs send -nP` dry-run estimate the live progress bar
+  uses, compares it against the destination's actual free space, and - if
+  it plainly will not fit - prunes under the retention policy and
+  re-checks. If it still will not fit, the run stops before touching the
+  network or the disk, with a breakdown of what is needed, what is free,
+  which datasets are the biggest contributors, and what to do about it
+  (prune further, narrow the backup scope, use a bigger disk) - instead of
+  running for hours and dying mid-transfer with a bare "No space left on
+  device".
+- **`prune-snapshots` subcommand: source-pool retention, independent of
+  sanoid.** sanoid manages its own `autosnap_*` snapshots under its own
+  schedule, which is not always tight enough to keep a quota'd dataset out
+  of trouble. `zfs-backup prune-snapshots` thins both zfs-backup's own
+  snapshots and sanoid's on the datasets already in the backup scope, under
+  the same grandfather-father-son policy - on independent timelines per
+  family, so one family's cadence never knocks the other's incremental
+  base out of the "keep" set. zfs-backup's own snapshots are bookmarked
+  before pruning so incremental backups keep working; sanoid's are freed
+  outright, since zfs-backup never uses them as a send base. sanoid itself,
+  and its schedule, are left completely untouched. Dry run is the default;
+  `--yes` plus a typed `DESTROY` confirmation is required to actually
+  prune, matching `cleanup-orphans`.
+
+## [2.3.0] - 2026-09-20
+
+### Added
+
+- **Live byte-level progress and ETA during sync.** A dataset with a single
+  outstanding snapshot could sit "syncing" for hours with no visible change:
+  one dot, no percentage, and "Estimated time remaining" stuck on 0s (it was
+  averaged from the handful of seconds earlier stages like importing the pool
+  or loading the key took, then multiplied across the remaining stages -
+  meaningless once the actual sync stage itself runs for hours). The sync
+  stage now sizes each dataset's transfer with a `zfs send -nP` dry run,
+  samples bytes received at the destination every ~2s, and shows a real
+  "sent / estimated (percent) - rate - ETA" line - in the TUI's per-dataset
+  grid and, throttled to once every 30s, in headless/CLI output too.
+
+### Fixed
+
+- **A backup could fail outright if a stalled resume outlived its own base
+  snapshot.** When a `zfs send/receive` sat interrupted for a long time,
+  sanoid's normal snapshot rotation could destroy the exact source snapshot
+  the destination's partial-receive resume token depended on. The next
+  attempt then failed hard with `cannot resume send: '...' used in the
+  initial send no longer exists`, and every retry failed the same way since
+  nothing about the failure ever changed. The sync stage now recognises this
+  specific failure, clears the stale resume token (`zfs receive -A`), and
+  retries once from the latest common snapshot or bookmark instead of
+  reporting the dataset as failed.
+
 ## [2.2.1] - 2026-09-19
 
 ### Fixed

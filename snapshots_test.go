@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -76,68 +77,97 @@ func TestParseSnapshotEntries(t *testing.T) {
 	}
 }
 
-// snapshotFixture builds a snapshot entry n days before a fixed reference time.
+// retentionReferenceTime is the fixed "now" every retention test measures
+// against, so results never depend on when the suite happens to run.
+var retentionReferenceTime = time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+
+// snapshotFixture builds a snapshot entry n days before retentionReferenceTime.
 func snapshotFixture(dataset, tag string, daysAgo int) snapshotEntry {
-	reference := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
 	return snapshotEntry{
 		Name:     dataset + "@" + tag,
 		Dataset:  dataset,
 		Tag:      tag,
-		Creation: reference.AddDate(0, 0, -daysAgo),
+		Creation: retentionReferenceTime.AddDate(0, 0, -daysAgo),
 		Used:     1024,
 	}
 }
 
-func TestSelectSnapshotsToPruneKeepsNewestAndIgnoresForeignSnapshots(t *testing.T) {
-	entries := []snapshotEntry{
+// snapshotFixtureAt builds a snapshot entry a given duration before
+// retentionReferenceTime, for tests that need same-day granularity.
+func snapshotFixtureAt(dataset, tag string, before time.Duration) snapshotEntry {
+	return snapshotEntry{
+		Name:     dataset + "@" + tag,
+		Dataset:  dataset,
+		Tag:      tag,
+		Creation: retentionReferenceTime.Add(-before),
+		Used:     1024,
+	}
+}
+
+func TestSelectPruneCandidatesIgnoresForeignSnapshots(t *testing.T) {
+	all := []snapshotEntry{
 		snapshotFixture("NIXROOT/home", "2026-08-14.10h-00-Backup", 0),
-		snapshotFixture("NIXROOT/home", "2026-08-13.10h-00-Backup", 1),
-		snapshotFixture("NIXROOT/home", "2026-08-12.10h-00-Backup", 2),
 		snapshotFixture("NIXROOT/home", "autosnap_2026-08-11_22:00:00_hourly", 3),
 		snapshotFixture("NIXROOT/home", "syncoid_abyss_2026-08-10:00:49:53-GMT01:00", 4),
 		snapshotFixture("NIXROOT/home", "keep-me-please", 5),
 	}
 
-	prune := selectSnapshotsToPrune(entries, 2)
-
-	if len(prune) != 1 {
-		t.Fatalf("expected exactly 1 snapshot to prune, got %d: %+v", len(prune), prune)
-	}
-	if prune[0].Tag != "2026-08-12.10h-00-Backup" {
-		t.Errorf("expected the oldest zfs-backup snapshot, got %q", prune[0].Tag)
-	}
-}
-
-func TestSelectSnapshotsToPruneNeverPrunesTheOnlyBase(t *testing.T) {
-	entries := []snapshotEntry{
-		snapshotFixture("NIXROOT/home", "2026-08-14.10h-00-Backup", 0),
-	}
-
-	// keep=0 would be a caller bug; the newest snapshot is the incremental
-	// base and must survive regardless.
-	if prune := selectSnapshotsToPrune(entries, 0); len(prune) != 0 {
-		t.Errorf("expected nothing to be pruned, got %+v", prune)
+	// filterBackupSnapshots - what pruneLocalSnapshots/pruneDestinationSnapshots
+	// actually call before handing entries to the retention policy - must
+	// strip everything but zfs-backup's own tag, so retention never even sees
+	// a foreign snapshot, let alone destroys one.
+	own := filterBackupSnapshots(all)
+	if len(own) != 1 || own[0].Tag != "2026-08-14.10h-00-Backup" {
+		t.Fatalf("expected only the zfs-backup snapshot to survive filtering, got %+v", own)
 	}
 }
 
-func TestSelectDestinationSnapshotsToPruneKeepsMonthlyArchivesAndNewest(t *testing.T) {
+// TestSelectPruneCandidatesAppliesEveryRetentionTier constructs one snapshot
+// per grandfather-father-son tier (plus a same-day loser and a same-year
+// loser) and checks selectPruneCandidates keeps exactly one representative
+// per tier and prunes the rest.
+func TestSelectPruneCandidatesAppliesEveryRetentionTier(t *testing.T) {
 	entries := []snapshotEntry{
-		snapshotFixture("NIXBACKUPS/abyss/home", "2026-08-14.10h-00-Backup", 0),
-		snapshotFixture("NIXBACKUPS/abyss/home", "2026-07-04.10h-00-Backup", 41),
-		snapshotFixture("NIXBACKUPS/abyss/home", "2026-02-04.10h-00-Backup", 191),
-		snapshotFixture("NIXBACKUPS/abyss/home", "2025-12-04.10h-00-Backup", 253),
+		// The newest snapshot overall - also today's daily representative.
+		snapshotFixtureAt("NIXROOT/home", "daily-newest", 0),
+		// Same calendar day as the above, but older - must lose to it.
+		snapshotFixtureAt("NIXROOT/home", "daily-loser", 6*time.Hour),
+		// 10 days ago: outside the 7-day daily window, inside the 4-week
+		// weekly window, and alone in its ISO week.
+		snapshotFixture("NIXROOT/home", "weekly-rep", 10),
+		// 40 days ago: outside daily and weekly windows, inside the 12-month
+		// monthly window, alone in its month.
+		snapshotFixture("NIXROOT/home", "monthly-rep", 40),
+		// ~400 days ago: outside the monthly window entirely, kept as the
+		// newest entry in its calendar year (the yearly-forever tier).
+		snapshotFixture("NIXROOT/home", "yearly-rep", 400),
+		// ~500 days ago: the same calendar year as yearly-rep, but older -
+		// must lose to it in the yearly bucket.
+		snapshotFixture("NIXROOT/home", "yearly-loser", 500),
 	}
 
-	prune := selectDestinationSnapshotsToPrune(entries, recentMonths(
-		time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC), 3))
+	prune := selectPruneCandidates(entries, retentionReferenceTime, defaultRetentionPolicy)
 
 	var pruned []string
 	for _, e := range prune {
 		pruned = append(pruned, e.Tag)
 	}
-	want := []string{"2026-02-04.10h-00-Backup", "2025-12-04.10h-00-Backup"}
+	sort.Strings(pruned)
+	want := []string{"daily-loser", "yearly-loser"}
 	if !reflect.DeepEqual(pruned, want) {
 		t.Errorf("pruned %v, want %v", pruned, want)
+	}
+}
+
+func TestSelectPruneCandidatesNeverPrunesTheOnlyBase(t *testing.T) {
+	entries := []snapshotEntry{
+		snapshotFixture("NIXROOT/home", "2020-01-01.00h-00-Backup", 3000),
+	}
+
+	// A policy of all zeros would be a caller bug; the newest snapshot is
+	// the incremental base and must survive regardless.
+	if prune := selectPruneCandidates(entries, retentionReferenceTime, retentionPolicy{}); len(prune) != 0 {
+		t.Errorf("expected nothing to be pruned, got %+v", prune)
 	}
 }
 
@@ -244,11 +274,15 @@ func pruneFixtureRunner(listings map[string]string) *fakeRunner {
 // TestPruneLocalSnapshotsCoversEveryDatasetInScope is the regression test for
 // the prune half of the bug: pre-2.0 only POOL/home was ever pruned.
 func TestPruneLocalSnapshotsCoversEveryDatasetInScope(t *testing.T) {
+	// All 10 snapshots land on the same calendar day, an hour apart, so the
+	// daily tier alone keeps just the newest one per dataset - unambiguous
+	// without needing to reason about ISO week boundaries.
+	reference := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
 	listing := func(dataset string) string {
 		var b strings.Builder
-		for day := 1; day <= 10; day++ {
-			fmt.Fprintf(&b, "%s@2026-08-%02d.10h-00-Backup\t%d\t1024\n",
-				dataset, day, time.Date(2026, 8, day, 10, 0, 0, 0, time.UTC).Unix())
+		for hour := 0; hour <= 9; hour++ {
+			fmt.Fprintf(&b, "%s@2026-08-10.%02dh-00-Backup\t%d\t1024\n",
+				dataset, hour, time.Date(2026, 8, 10, hour, 0, 0, 0, time.UTC).Unix())
 		}
 		return b.String()
 	}
@@ -258,14 +292,15 @@ func TestPruneLocalSnapshotsCoversEveryDatasetInScope(t *testing.T) {
 	})
 
 	result := pruneLocalSnapshots(context.Background(), runner, "NIXROOT",
-		[]string{"home", "atuin"}, 7)
+		[]string{"home", "atuin"}, defaultRetentionPolicy, reference)
 
 	if len(result.Warnings) != 0 {
 		t.Errorf("unexpected warnings: %v", result.Warnings)
 	}
-	// 10 snapshots per dataset, keeping 7, leaves 3 to prune on each.
-	if len(result.Pruned) != 6 {
-		t.Fatalf("expected 6 pruned snapshots across both datasets, got %d: %v",
+	// 10 snapshots per dataset, same day, keeping only the newest, leaves 9
+	// to prune on each.
+	if len(result.Pruned) != 18 {
+		t.Fatalf("expected 18 pruned snapshots across both datasets, got %d: %v",
 			len(result.Pruned), result.Pruned)
 	}
 	for _, dataset := range []string{"NIXROOT/home", "NIXROOT/atuin"} {
@@ -274,6 +309,9 @@ func TestPruneLocalSnapshotsCoversEveryDatasetInScope(t *testing.T) {
 		}
 		if !runner.ran("zfs bookmark " + dataset + "@") {
 			t.Errorf("%s should have been bookmarked before pruning", dataset)
+		}
+		if runner.ran("zfs destroy " + dataset + "@2026-08-10.09h-00-Backup") {
+			t.Errorf("%s: the newest snapshot of the day must survive", dataset)
 		}
 	}
 }

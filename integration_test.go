@@ -124,6 +124,13 @@ func TestIntegrationSnapshotScopeLeavesOtherDatasetsUntouched(t *testing.T) {
 
 // TestIntegrationRepeatedRunsStayBounded is scenario 4: snapshot counts must
 // not grow without limit across many runs, on every dataset in scope.
+//
+// Real snapshots carry their real creation time regardless of what the tag
+// says, so 12 runs of this loop - all executed within the same test, i.e.
+// the same retention bucket - collapse to whatever the grandfather-father-son
+// policy keeps for "today": at most one. What must hold regardless of timing
+// is the actual regression this guards: the count never grows unbounded, and
+// every dataset in scope is covered, not just the first one.
 func TestIntegrationRepeatedRunsStayBounded(t *testing.T) {
 	requireIntegrationEnv(t)
 	pool := newTestPool(t, "home", "atuin")
@@ -131,21 +138,20 @@ func TestIntegrationRepeatedRunsStayBounded(t *testing.T) {
 	datasets := []string{"home", "atuin"}
 
 	for run := 0; run < 12; run++ {
-		// Distinct tags, oldest first, so pruning has something to do.
-		tag := snapshotTagForTime(time.Date(2026, 1, 1+run, 10, 0, 0, 0, time.UTC))
+		tag := snapshotTagForTime(time.Now())
 		if _, err := createDatasetSnapshots(ctx, defaultRunner, pool, datasets, tag); err != nil {
 			t.Fatalf("run %d: createDatasetSnapshots: %v", run, err)
 		}
-		result := pruneLocalSnapshots(ctx, defaultRunner, pool, datasets, localBackupSnapshotsKept)
+		result := pruneLocalSnapshots(ctx, defaultRunner, pool, datasets, defaultRetentionPolicy, time.Now())
 		if len(result.Warnings) > 0 {
 			t.Fatalf("run %d: prune warnings: %v", run, result.Warnings)
 		}
 	}
 
 	for _, ds := range datasets {
-		if got := snapshotCount(t, pool+"/"+ds); got != localBackupSnapshotsKept {
-			t.Errorf("%s/%s should hold %d snapshots after 12 runs, got %d",
-				pool, ds, localBackupSnapshotsKept, got)
+		if got := snapshotCount(t, pool+"/"+ds); got < 1 || got > 2 {
+			t.Errorf("%s/%s should hold 1-2 snapshots after 12 runs within the same retention bucket, got %d",
+				pool, ds, got)
 		}
 		// Pruned snapshots must survive as bookmarks so incrementals still work.
 		out, err := exec.Command("zfs", "list", "-H", "-o", "name", "-t", "bookmark", pool+"/"+ds).Output()

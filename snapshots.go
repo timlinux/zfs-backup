@@ -36,6 +36,14 @@ var backupSnapshotPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}\.\d{2}h-\d{2}
 // behind on failed sends.
 var syncoidSnapshotPattern = regexp.MustCompile(`^syncoid_.+`)
 
+// sanoidAutosnapPattern matches sanoid's own periodic snapshots, e.g.
+// autosnap_2026-07-22_22:00:00_hourly. sanoid is a separate service that
+// manages its own creation schedule; zfs-backup never creates these, but the
+// source-retention tool (prune-snapshots) is allowed to thin them out under
+// the same GFS policy as its own snapshots, since sanoid's own retention is
+// not always tight enough to keep a quota'd dataset out of trouble.
+var sanoidAutosnapPattern = regexp.MustCompile(`^autosnap_.+`)
+
 // protectedSnapshotTags are never touched under any circumstance. On NixOS
 // "erase your darlings" installs, POOL/root@blank is rolled back to on every
 // boot - destroying it breaks the system.
@@ -56,6 +64,12 @@ func isBackupSnapshotTag(tag string) bool {
 // isSyncoidSnapshotTag reports whether a snapshot tag is a syncoid sync-snapshot.
 func isSyncoidSnapshotTag(tag string) bool {
 	return syncoidSnapshotPattern.MatchString(tag)
+}
+
+// isSanoidAutosnapTag reports whether a snapshot tag is one of sanoid's own
+// periodic snapshots.
+func isSanoidAutosnapTag(tag string) bool {
+	return sanoidAutosnapPattern.MatchString(tag)
 }
 
 // isProtectedSnapshotTag reports whether a snapshot must never be destroyed.
@@ -173,6 +187,25 @@ func filterBackupSnapshots(entries []snapshotEntry) []snapshotEntry {
 	return own
 }
 
+// filterManagedSourceSnapshots keeps the snapshots the source-retention tool
+// (prune-snapshots) is allowed to thin out: zfs-backup's own `-Backup`
+// snapshots and sanoid's `autosnap_*` snapshots. Anything else - a syncoid
+// leftover, a snapshot the user made by hand, @blank - is left strictly
+// alone, exactly as filterBackupSnapshots leaves everything but its own
+// pattern alone.
+func filterManagedSourceSnapshots(entries []snapshotEntry) []snapshotEntry {
+	var managed []snapshotEntry
+	for _, e := range entries {
+		if isProtectedSnapshotTag(e.Tag) {
+			continue
+		}
+		if isBackupSnapshotTag(e.Tag) || isSanoidAutosnapTag(e.Tag) {
+			managed = append(managed, e)
+		}
+	}
+	return managed
+}
+
 // =============================================================================
 // Snapshot creation
 // =============================================================================
@@ -241,64 +274,113 @@ func snapshotsForDatasets(snapshots []string, datasets []string) []string {
 }
 
 // =============================================================================
-// Pruning
+// Retention policy (grandfather-father-son)
 // =============================================================================
 
-// localBackupSnapshotsKept is how many of zfs-backup's own snapshots stay on
-// the source pool per dataset. Older ones become bookmarks.
-const localBackupSnapshotsKept = 7
-
-// selectSnapshotsToPrune returns the snapshots to convert to bookmarks and
-// destroy, keeping the newest `keep` entries. Only zfs-backup's own snapshots
-// are ever considered - sanoid autosnaps, syncoid sync-snapshots and anything
-// the user made are left untouched.
-func selectSnapshotsToPrune(entries []snapshotEntry, keep int) []snapshotEntry {
-	own := filterBackupSnapshots(entries)
-	sortSnapshotsNewestFirst(own)
-
-	if keep < 1 {
-		keep = 1 // never prune the newest: it is the incremental base
-	}
-	if len(own) <= keep {
-		return nil
-	}
-	return own[keep:]
+// retentionPolicy is a grandfather-father-son retention schedule: keep the
+// newest snapshot per calendar day for the last Daily days, per ISO week for
+// the last Weekly weeks, per calendar month for the last Monthly months, and
+// per calendar year for the last Yearly years (0 means forever - never age
+// out yearly archives). The single newest snapshot overall is always kept
+// regardless of policy, since it is the incremental base for the next run.
+type retentionPolicy struct {
+	Daily   int
+	Weekly  int
+	Monthly int
+	Yearly  int // 0 = keep one snapshot per year forever
 }
 
-// selectDestinationSnapshotsToPrune returns the destination snapshots to prune,
-// keeping monthly archives for the given months plus the newest snapshot,
-// which is the base for the next incremental send.
-func selectDestinationSnapshotsToPrune(entries []snapshotEntry, keepMonths []string) []snapshotEntry {
-	own := filterBackupSnapshots(entries)
-	sortSnapshotsNewestFirst(own)
+// defaultRetentionPolicy is zfs-backup's standard schedule: a daily snapshot
+// for the last week, a weekly one for the last month, a monthly one for the
+// last year, and one a year forever after that.
+var defaultRetentionPolicy = retentionPolicy{Daily: 7, Weekly: 4, Monthly: 12, Yearly: 0}
 
-	var prune []snapshotEntry
-	for i, e := range own {
-		if i == 0 {
-			continue // always keep the newest - it is the incremental base
-		}
-		keep := false
-		for _, month := range keepMonths {
-			if strings.HasPrefix(e.Tag, month) {
-				keep = true
-				break
+// retentionPolicyDescription renders a policy as one human-readable line.
+func retentionPolicyDescription(p retentionPolicy) string {
+	yearly := fmt.Sprintf("one per year for the last %d years", p.Yearly)
+	if p.Yearly <= 0 {
+		yearly = "one per year forever"
+	}
+	return fmt.Sprintf("   policy: one per day for %d days, one per week for %d weeks,\n"+
+		"   one per month for %d months, %s.", p.Daily, p.Weekly, p.Monthly, yearly)
+}
+
+// selectRetained returns the full snapshot names selectPruneCandidates
+// decided to keep, per defaultRetentionPolicy's rules. Entries are assumed to
+// already be filtered to one "owned" naming family (e.g. filterBackupSnapshots
+// or filterManagedSourceSnapshots) - retention policy never looks at
+// snapshots it was not told belong to it.
+func selectRetained(entries []snapshotEntry, now time.Time, policy retentionPolicy) map[string]bool {
+	keep := map[string]bool{}
+	if len(entries) == 0 {
+		return keep
+	}
+
+	sorted := append([]snapshotEntry(nil), entries...)
+	sortSnapshotsNewestFirst(sorted)
+	keep[sorted[0].Name] = true // always keep the newest: the incremental base
+
+	keepNewestPerBucket := func(windowStart time.Time, bucketKey func(time.Time) string) {
+		best := map[string]snapshotEntry{}
+		for _, e := range sorted {
+			if e.Creation.Before(windowStart) {
+				continue
+			}
+			key := bucketKey(e.Creation)
+			if cur, ok := best[key]; !ok || e.Creation.After(cur.Creation) {
+				best[key] = e
 			}
 		}
-		if !keep {
+		for _, e := range best {
+			keep[e.Name] = true
+		}
+	}
+
+	if policy.Daily > 0 {
+		keepNewestPerBucket(now.AddDate(0, 0, -policy.Daily), func(t time.Time) string {
+			return t.Format("2006-01-02")
+		})
+	}
+	if policy.Weekly > 0 {
+		keepNewestPerBucket(now.AddDate(0, 0, -policy.Weekly*7), func(t time.Time) string {
+			year, week := t.ISOWeek()
+			return fmt.Sprintf("%d-W%02d", year, week)
+		})
+	}
+	if policy.Monthly > 0 {
+		keepNewestPerBucket(now.AddDate(0, -policy.Monthly, 0), func(t time.Time) string {
+			return t.Format("2006-01")
+		})
+	}
+	// Yearly: a zero windowStart (year 1) is always in the past, so a
+	// Yearly of 0 naturally means "forever" without a special case.
+	var yearlyWindowStart time.Time
+	if policy.Yearly > 0 {
+		yearlyWindowStart = now.AddDate(-policy.Yearly, 0, 0)
+	}
+	keepNewestPerBucket(yearlyWindowStart, func(t time.Time) string {
+		return t.Format("2006")
+	})
+
+	return keep
+}
+
+// selectPruneCandidates returns the entries selectRetained did not keep - the
+// ones to convert to bookmarks and destroy.
+func selectPruneCandidates(entries []snapshotEntry, now time.Time, policy retentionPolicy) []snapshotEntry {
+	keep := selectRetained(entries, now, policy)
+	var prune []snapshotEntry
+	for _, e := range entries {
+		if !keep[e.Name] {
 			prune = append(prune, e)
 		}
 	}
 	return prune
 }
 
-// recentMonths returns the year-month prefixes to retain on the backup pool.
-func recentMonths(now time.Time, count int) []string {
-	months := make([]string, 0, count)
-	for i := 0; i < count; i++ {
-		months = append(months, now.AddDate(0, -i, 0).Format("2006-01"))
-	}
-	return months
-}
+// =============================================================================
+// Pruning
+// =============================================================================
 
 // bookmarkAndDestroy converts a snapshot to a bookmark of the same name and
 // then destroys the snapshot. The destroy only happens once the bookmark is
@@ -337,10 +419,11 @@ type pruneResult struct {
 }
 
 // pruneLocalSnapshots converts old zfs-backup snapshots on the source pool to
-// bookmarks, one dataset at a time over the canonical dataset list. Unlike the
-// pre-2.0 implementation it covers every dataset it snapshots rather than only
+// bookmarks, one dataset at a time over the canonical dataset list, keeping
+// what policy's grandfather-father-son schedule calls for. Unlike the pre-2.0
+// implementation it covers every dataset it snapshots rather than only
 // POOL/home, which is what allowed snapshots to pile up elsewhere.
-func pruneLocalSnapshots(ctx context.Context, r commandRunner, pool string, datasets []string, keep int) pruneResult {
+func pruneLocalSnapshots(ctx context.Context, r commandRunner, pool string, datasets []string, policy retentionPolicy, now time.Time) pruneResult {
 	var result pruneResult
 
 	for _, ds := range datasets {
@@ -351,7 +434,8 @@ func pruneLocalSnapshots(ctx context.Context, r commandRunner, pool string, data
 			continue
 		}
 
-		for _, entry := range selectSnapshotsToPrune(entries, keep) {
+		own := filterBackupSnapshots(entries)
+		for _, entry := range selectPruneCandidates(own, now, policy) {
 			if err := bookmarkAndDestroy(ctx, r, entry.Name); err != nil {
 				result.Warnings = append(result.Warnings, err.Error())
 				continue
@@ -364,12 +448,10 @@ func pruneLocalSnapshots(ctx context.Context, r commandRunner, pool string, data
 }
 
 // pruneDestinationSnapshots prunes zfs-backup's own snapshots on the backup
-// pool, keeping monthly archives for the last three months plus the newest
-// snapshot of each dataset. destinations are fully qualified dataset names on
-// the backup pool.
-func pruneDestinationSnapshots(ctx context.Context, r commandRunner, destinations []string, now time.Time) pruneResult {
+// pool under policy's grandfather-father-son schedule. destinations are fully
+// qualified dataset names on the backup pool.
+func pruneDestinationSnapshots(ctx context.Context, r commandRunner, destinations []string, policy retentionPolicy, now time.Time) pruneResult {
 	var result pruneResult
-	keepMonths := recentMonths(now, 3)
 
 	for _, dest := range destinations {
 		entries, err := listSnapshotEntries(ctx, r, dest, 1)
@@ -379,7 +461,8 @@ func pruneDestinationSnapshots(ctx context.Context, r commandRunner, destination
 			continue
 		}
 
-		for _, entry := range selectDestinationSnapshotsToPrune(entries, keepMonths) {
+		own := filterBackupSnapshots(entries)
+		for _, entry := range selectPruneCandidates(own, now, policy) {
 			if err := bookmarkAndDestroy(ctx, r, entry.Name); err != nil {
 				result.Warnings = append(result.Warnings, err.Error())
 				continue
